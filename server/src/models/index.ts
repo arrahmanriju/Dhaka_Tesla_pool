@@ -9,3 +9,5 @@ export const sequelize = new Sequelize({
   storage: storagePath,
   logging: false,
 });
+
+export { User } from './User';
