@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:3001
+    depends_on:
+      - server
+    networks:
+      - dhaka_tesla_pool_network
+
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - NODE_ENV=development
+      - DB_STORAGE_PATH=./data/database.sqlite
+    volumes:
+      - ./server/data:/app/data
+    networks:
+      - dhaka_tesla_pool_network
+
+networks:
+  dhaka_tesla_pool_network:
+    driver: bridge
