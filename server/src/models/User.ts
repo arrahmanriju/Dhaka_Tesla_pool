@@ -6,6 +6,7 @@ export class User extends Model {
   public name!: string;
   public role!: 'DRIVER' | 'PASSENGER';
   public password!: string;
+  public isOnline!: boolean;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
 }
@@ -30,6 +31,11 @@ export const initUser = (sequelize: any) => {
       password: {
         type: DataTypes.STRING,
         allowNull: false,
+      },
+      isOnline: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
       },
     },
     {
