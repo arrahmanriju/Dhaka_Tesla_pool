@@ -28,11 +28,12 @@ router.post('/signup', async (req: Request, res: Response) => {
       name,
       password: hashedPassword,
       role,
+      isOnline: role === 'DRIVER' ? false : undefined,
     });
 
     const token = jwt.sign({ id: user.id, role: user.role, name: user.name }, JWT_SECRET, { expiresIn: '24h' });
     
-    res.status(201).json({ token, user: { id: user.id, name: user.name, role: user.role } });
+    res.status(201).json({ token, user: { id: user.id, name: user.name, role: user.role, isOnline: user.isOnline } });
   } catch (error) {
     console.error('Signup error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -59,7 +60,7 @@ router.post('/login', async (req: Request, res: Response) => {
 
     const token = jwt.sign({ id: user.id, role: user.role, name: user.name }, JWT_SECRET, { expiresIn: '24h' });
     
-    res.json({ token, user: { id: user.id, name: user.name, role: user.role } });
+    res.json({ token, user: { id: user.id, name: user.name, role: user.role, isOnline: user.isOnline } });
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ error: 'Internal server error' });
