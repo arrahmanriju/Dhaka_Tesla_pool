@@ -60,6 +60,7 @@ export interface Ride {
     modelName: string;
     licensePlate: string;
     seatCapacity: number;
+    occupiedSeats?: number;
   } | null;
   driverId?: string;
   vehicleId?: string;
