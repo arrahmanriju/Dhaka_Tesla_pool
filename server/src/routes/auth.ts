@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { User } from '../models';
 import { isValidEmail, isValidPassword, isValidName } from '../utils/validation';
+import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 
 const router = Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-mvp-key';
@@ -113,6 +114,24 @@ router.post('/login', async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('[login] error:', error);
+    return res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+/**
+ * GET /auth/me
+ * Requires: Authorization: Bearer <token>
+ * Returns the current authenticated user's profile.
+ */
+router.get('/me', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const user = await User.findByPk(req.user!.id, {
+      attributes: ['id', 'name', 'email', 'role', 'createdAt'],
+    });
+    if (!user) return res.status(404).json({ error: 'User not found.' });
+    return res.json({ user });
+  } catch (error) {
+    console.error('[me] error:', error);
     return res.status(500).json({ error: 'Internal server error.' });
   }
 });
