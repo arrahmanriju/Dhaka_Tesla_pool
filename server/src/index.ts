@@ -5,6 +5,7 @@ import authRoutes from './routes/auth';
 import driverRoutes from './routes/driver';
 import vehicleRoutes from './routes/vehicle';
 import rideRequestRoutes from './routes/rideRequest';
+import passengerRoutes from './routes/passenger';
 import { sequelize } from './models';
 
 dotenv.config();
@@ -28,6 +29,8 @@ app.use('/vehicle', vehicleRoutes);
 // Ride Request routes (passenger creates + views, driver accepts)
 app.use('/ride-requests', rideRequestRoutes);
 
+// Passenger status routes (live tracking, history, cancellation)
+app.use('/passenger', passengerRoutes);
 // Health check endpoint
 app.get('/health', (req: Request, res: Response) => {
   res.status(200).json({ status: 'ok', service: 'dhaka-tesla-pool-backend' });
