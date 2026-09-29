@@ -1,42 +1,50 @@
 'use client';
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { AppNav } from '@/components/AppNav';
 import { StatusBadge } from '@/components/StatusBadge';
-import { LoadingScreen, EmptyState, ErrorBanner, SuccessBanner, Spinner } from '@/components/UI';
-import { driverApi, type Ride, type Vehicle } from '@/lib/api';
+import { LoadingScreen, EmptyState, ErrorBanner, SuccessBanner, Spinner, SeatCount } from '@/components/UI';
+import { driverApi, ApiError, type Ride, type Vehicle } from '@/lib/api';
 import { getUser } from '@/lib/auth';
+import { usePreferences, useFormatApiError } from '@/lib/preferences';
 
 type Tab = 'pending' | 'active' | 'vehicle' | 'history';
 
 export default function DriverDashboard() {
   const router = useRouter();
+  const { t } = usePreferences();
   const [user, setUser] = useState<ReturnType<typeof getUser>>(null);
   const [tab, setTab] = useState<Tab>('active');
   const [isOnline, setIsOnline] = useState(false);
   const [togglingOnline, setTogglingOnline] = useState(false);
+  // null = not known yet (or the check failed; the server enforces the rule either way)
+  const [onboarded, setOnboarded] = useState<boolean | null>(null);
 
   useEffect(() => {
     const u = getUser();
     if (!u || u.role !== 'DRIVER') { router.replace('/auth'); return; }
     setUser(u);
     setIsOnline(!!(u as any).isOnline);
+    driverApi.getOnboarding().then((s) => setOnboarded(s.onboarded)).catch(() => setOnboarded(null));
   }, [router]);
 
   const handleToggleOnline = async () => {
     if (!user) return;
+    if (!isOnline && onboarded === false) return; // must finish onboarding first
     setTogglingOnline(true);
     try {
       const res = await driverApi.setOnlineStatus(user.id, !isOnline);
       setIsOnline(res.user.isOnline ?? !isOnline);
-    } catch {
-      // silently revert
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'ONBOARDING_REQUIRED') setOnboarded(false);
+      // otherwise: silently revert
     } finally {
       setTogglingOnline(false);
     }
   };
 
-  if (!user) return <LoadingScreen label="Loading driver dashboard…" />;
+  if (!user) return <LoadingScreen label={t('loading.driver')} />;
 
   return (
     <div className="dashboard">
@@ -46,10 +54,10 @@ export default function DriverDashboard() {
       <div className="tab-nav-wrapper">
         <div className="tab-nav">
           {([
-            { id: 'active',  label: '🚗 Active Rides' },
-            { id: 'pending', label: '📋 Pending Requests' },
-            { id: 'vehicle', label: '🔧 Vehicle' },
-            { id: 'history', label: '🕓 History' },
+            { id: 'active',  label: `🛺 ${t('d.tab.active')}` },
+            { id: 'pending', label: `📋 ${t('d.tab.pending')}` },
+            { id: 'vehicle', label: `🔧 ${t('d.tab.vehicle')}` },
+            { id: 'history', label: `🕓 ${t('d.tab.history')}` },
           ] as { id: Tab; label: string }[]).map((t) => (
             <button
               key={t.id}
@@ -64,14 +72,27 @@ export default function DriverDashboard() {
       </div>
 
       <div className="dashboard__body">
+        {/* A driver can't go online until onboarding (vehicle, NID, home zone) is done */}
+        {onboarded === false && (
+          <div className="notice-card" id="onboarding-banner" role="status">
+            <div>
+              <div className="notice-card__title">{t('d.onboard.bannerTitle')}</div>
+              <div className="notice-card__desc">{t('d.onboard.bannerDesc')}</div>
+            </div>
+            <Link href="/driver/onboarding" id="onboarding-cta" className="btn btn--primary btn--sm">
+              {t('d.onboard.cta')}
+            </Link>
+          </div>
+        )}
+
         {/* Online / offline toggle */}
         <div className="online-toggle">
           <div>
             <div className="online-toggle__label">
-              {isOnline ? '🟢 You are online' : '⚫ You are offline'}
+              {isOnline ? t('d.online') : t('d.offline')}
             </div>
             <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
-              {isOnline ? 'Passengers can see you in their search.' : 'Go online to start accepting rides.'}
+              {isOnline ? t('d.onlineDesc') : onboarded === false ? t('d.onboard.toggleHint') : t('d.offlineDesc')}
             </div>
           </div>
           <label className="toggle-switch">
@@ -79,8 +100,9 @@ export default function DriverDashboard() {
               type="checkbox"
               checked={isOnline}
               onChange={handleToggleOnline}
-              disabled={togglingOnline}
+              disabled={togglingOnline || (!isOnline && onboarded === false)}
               id="driver-online-toggle"
+              aria-label={t('d.onlineToggle')}
             />
             <span className="toggle-switch__slider" />
           </label>
@@ -97,7 +119,11 @@ export default function DriverDashboard() {
 
 // ─── Pending Requests Tab ──────────────────────────────────────────────────
 function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline: boolean }) {
+  const router = useRouter();
+  const { t, tz, locale } = usePreferences();
+  const formatError = useFormatApiError();
   const [rides, setRides] = useState<Ride[]>([]);
+  const [noVehicle, setNoVehicle] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [accepting, setAccepting] = useState<string | null>(null);
@@ -108,12 +134,13 @@ function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline
     try {
       const res = await driverApi.getPendingRides(driverId);
       setRides(res.rides);
+      setNoVehicle(res.noVehicle);
     } catch (err: any) {
-      setError(err.status ? `Error ${err.status}: ${err.message}` : err.message);
+      setError(formatError(err));
     } finally {
       setLoading(false);
     }
-  }, [driverId]);
+  }, [driverId, formatError]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -121,60 +148,71 @@ function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline
     setAccepting(rideId); setError(''); setSuccessMsg('');
     try {
       await driverApi.acceptRide(rideId, driverId);
-      setSuccessMsg('Ride accepted and added to your pool!');
+      setSuccessMsg(t('d.pending.accepted'));
       await load();
     } catch (err: any) {
-      setError(err.status ? `Error ${err.status}: ${err.message}` : err.message);
+      setError(formatError(err));
     } finally {
       setAccepting(null);
     }
   };
 
-  if (loading) return <LoadingScreen label="Loading pending requests…" />;
+  if (loading) return <LoadingScreen label={t('loading.pending')} />;
 
   return (
     <div className="animate-in">
       <div className="section-header">
         <div>
-          <h1 className="section-title">Pending Requests</h1>
-          <p className="section-desc">Passengers waiting for a driver to accept their ride.</p>
+          <h1 className="section-title">{t('d.pending.title')}</h1>
+          <p className="section-desc">{t('d.pending.desc')}</p>
         </div>
-        <button className="btn btn--ghost btn--sm" onClick={load} id="refresh-pending">↻ Refresh</button>
+        <button className="btn btn--ghost btn--sm" onClick={load} id="refresh-pending">{t('common.refresh')}</button>
       </div>
 
-      {!isOnline && (
+      {!isOnline && !noVehicle && (
         <div className="error-banner" style={{ marginBottom: 16 }}>
-          ⚠ You must be online to accept rides.
+          {t('d.pending.mustBeOnline')}
         </div>
       )}
       {error && <ErrorBanner message={error} />}
       {successMsg && <SuccessBanner message={successMsg} />}
 
-      {rides.length === 0 ? (
+      {noVehicle ? (
+        <EmptyState
+          icon="🔧"
+          title={t('d.pending.noVehicleTitle')}
+          description={t('d.pending.noVehicleDesc')}
+          action={
+            <button className="btn btn--primary" id="pending-register-vehicle" onClick={() => router.push('/driver/onboarding')}>
+              {t('d.pending.noVehicleAction')}
+            </button>
+          }
+        />
+      ) : rides.length === 0 ? (
         <EmptyState
           icon="🛣️"
-          title="No pending requests"
-          description="Check back soon — new ride requests will appear here."
+          title={t('d.pending.emptyTitle')}
+          description={t('d.pending.emptyDesc')}
         />
       ) : (
         <div className="ride-list">
           {rides.map((ride) => (
             <div key={ride.id} className="ride-card">
               <div className="ride-card__route">
-                <span className="ride-card__zone">{ride.pickupZone}</span>
+                <span className="ride-card__zone">{tz(ride.pickupZone)}</span>
                 <span className="ride-card__arrow">→</span>
-                <span className="ride-card__zone">{ride.destinationZone}</span>
+                <span className="ride-card__zone">{tz(ride.destinationZone)}</span>
                 <StatusBadge status={ride.status} />
               </div>
               <div className="ride-card__meta">
                 <span className="ride-card__meta-item">
-                  <strong>{ride.seatCount}</strong> seat{ride.seatCount > 1 ? 's' : ''}
+                  <SeatCount n={ride.seatCount} />
                 </span>
                 <span className="ride-card__meta-item">
-                  Fare: <strong>৳{ride.estimatedFareBDT}</strong>
+                  {t('common.fare')} <strong>৳{ride.estimatedFareBDT}</strong>
                 </span>
                 <span className="ride-card__meta-item" style={{ color: 'var(--text-muted)' }}>
-                  {new Date(ride.createdAt).toLocaleTimeString()}
+                  {new Date(ride.createdAt).toLocaleTimeString(locale)}
                 </span>
               </div>
               <div className="ride-card__footer">
@@ -185,7 +223,7 @@ function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline
                   disabled={!isOnline || accepting === ride.id}
                   onClick={() => handleAccept(ride.id)}
                 >
-                  {accepting === ride.id ? <><Spinner /> Accepting…</> : 'Accept ride ✓'}
+                  {accepting === ride.id ? <><Spinner /> {t('d.pending.accepting')}</> : t('d.pending.accept')}
                 </button>
               </div>
             </div>
@@ -198,6 +236,8 @@ function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline
 
 // ─── Active Rides Tab ──────────────────────────────────────────────────────
 function ActiveRidesTab({ driverId }: { driverId: string }) {
+  const { t } = usePreferences();
+  const formatError = useFormatApiError();
   const [rides, setRides] = useState<Ride[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -210,11 +250,11 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
       const res = await driverApi.getActiveRides(driverId);
       setRides(res.rides);
     } catch (err: any) {
-      setError(err.status ? `Error ${err.status}: ${err.message}` : err.message);
+      setError(formatError(err));
     } finally {
       setLoading(false);
     }
-  }, [driverId]);
+  }, [driverId, formatError]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -225,16 +265,16 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
     setActionLoading(rideId + action); setError(''); setSuccessMsg('');
     try {
       await driverApi[action](rideId, driverId);
-      setSuccessMsg(`Ride marked as ${action === 'arrive' ? 'driver arrived' : action}ed.`);
+      setSuccessMsg(t(`d.active.done.${action}`));
       await load();
     } catch (err: any) {
-      setError(err.status ? `Error ${err.status}: ${err.message}` : err.message);
+      setError(formatError(err));
     } finally {
       setActionLoading(null);
     }
   };
 
-  if (loading) return <LoadingScreen label="Loading active rides…" />;
+  if (loading) return <LoadingScreen label={t('loading.activeRides')} />;
 
   // Only show EmptyState if load succeeded (no error). If there's an error,
   // the ErrorBanner above already tells the user what went wrong.
@@ -244,10 +284,10 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
     <div className="animate-in">
       <div className="section-header">
         <div>
-          <h1 className="section-title">Your Active Pool</h1>
-          <p className="section-desc">Manage matched rides and move through the trip lifecycle.</p>
+          <h1 className="section-title">{t('d.active.title')}</h1>
+          <p className="section-desc">{t('d.active.desc')}</p>
         </div>
-        <button className="btn btn--ghost btn--sm" onClick={load} id="refresh-active-driver">↻ Refresh</button>
+        <button className="btn btn--ghost btn--sm" onClick={load} id="refresh-active-driver">{t('common.refresh')}</button>
       </div>
 
       {error && <ErrorBanner message={error} />}
@@ -255,9 +295,9 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
 
       {showEmpty ? (
         <EmptyState
-          icon="🚗"
-          title="No active rides"
-          description="Accept pending requests to build your pool."
+          icon="🛺"
+          title={t('d.active.emptyTitle')}
+          description={t('d.active.emptyDesc')}
         />
       ) : rides.length > 0 ? (
         <div className="ride-list">
@@ -284,35 +324,36 @@ function ActiveDriverRideCard({
   onAction: (id: string, a: 'arrive' | 'start' | 'complete' | 'cancel') => void;
   actionLoading: string | null;
 }) {
+  const { t, tz, locale } = usePreferences();
   // Determine which lifecycle buttons to show based on current state
   const actions: { label: string; action: 'arrive' | 'start' | 'complete' | 'cancel'; cls: string }[] = [];
-  if (ride.status === 'MATCHED')        actions.push({ label: '📍 Mark Arrived',    action: 'arrive',   cls: 'btn--warning' });
-  if (ride.status === 'DRIVER_ARRIVED') actions.push({ label: '▶ Start Trip',        action: 'start',    cls: 'btn--primary' });
-  if (ride.status === 'STARTED')        actions.push({ label: '✅ Complete Trip',    action: 'complete', cls: 'btn--success' });
+  if (ride.status === 'MATCHED')        actions.push({ label: t('d.active.act.arrive'),   action: 'arrive',   cls: 'btn--warning' });
+  if (ride.status === 'DRIVER_ARRIVED') actions.push({ label: t('d.active.act.start'),    action: 'start',    cls: 'btn--primary' });
+  if (ride.status === 'STARTED')        actions.push({ label: t('d.active.act.complete'), action: 'complete', cls: 'btn--success' });
   if (['MATCHED', 'DRIVER_ARRIVED'].includes(ride.status))
-    actions.push({ label: 'Cancel', action: 'cancel', cls: 'btn--danger' });
+    actions.push({ label: t('common.cancel'), action: 'cancel', cls: 'btn--danger' });
 
   return (
     <div className="ride-card">
       <div className="ride-card__route">
-        <span className="ride-card__zone">{ride.pickupZone}</span>
+        <span className="ride-card__zone">{tz(ride.pickupZone)}</span>
         <span className="ride-card__arrow">→</span>
-        <span className="ride-card__zone">{ride.destinationZone}</span>
+        <span className="ride-card__zone">{tz(ride.destinationZone)}</span>
         <StatusBadge status={ride.status} />
       </div>
 
       <div className="ride-card__meta">
         <span className="ride-card__meta-item">
-          <strong>{ride.seatCount}</strong> seat{ride.seatCount > 1 ? 's' : ''}
+          <SeatCount n={ride.seatCount} />
         </span>
         <span className="ride-card__meta-item">
-          Fare: <strong>৳{ride.estimatedFareBDT}</strong>
+          {t('common.fare')} <strong>৳{ride.estimatedFareBDT}</strong>
         </span>
         {ride.vehicle && (
           <span className="ride-card__meta-item">
-            🚗 <strong>{ride.vehicle.modelName}</strong>
+            🛺 <strong>{ride.vehicle.modelName}</strong>
             &nbsp;·&nbsp;
-            {ride.vehicle.occupiedSeats ?? '?'}/{ride.vehicle.seatCapacity} seats
+            {t('d.active.seatsUsed', { used: ride.vehicle.occupiedSeats ?? '?', total: ride.vehicle.seatCapacity })}
           </span>
         )}
       </div>
@@ -320,7 +361,7 @@ function ActiveDriverRideCard({
       {actions.length > 0 && (
         <div className="ride-card__footer">
           <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-            {new Date(ride.updatedAt).toLocaleTimeString()}
+            {new Date(ride.updatedAt).toLocaleTimeString(locale)}
           </span>
           <div style={{ display: 'flex', gap: 8 }}>
             {actions.map((a) => (
@@ -343,12 +384,11 @@ function ActiveDriverRideCard({
 
 // ─── Vehicle Tab ───────────────────────────────────────────────────────────
 function VehicleTab({ driverId }: { driverId: string }) {
+  const { t } = usePreferences();
+  const router = useRouter();
   const [vehicle, setVehicle] = useState<Vehicle | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
-  const [registering, setRegistering] = useState(false);
-  const [form, setForm] = useState({ modelName: '', licensePlate: '', seatCapacity: 4 });
 
   useEffect(() => {
     driverApi.getVehicle(driverId)
@@ -357,59 +397,42 @@ function VehicleTab({ driverId }: { driverId: string }) {
       .finally(() => setLoading(false));
   }, [driverId]);
 
-  const handleRegister = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError(''); setSuccess(''); setRegistering(true);
-    try {
-      const res = await driverApi.registerVehicle(
-        driverId, form.modelName, form.licensePlate, form.seatCapacity
-      );
-      setVehicle(res.vehicle);
-      setSuccess('Vehicle registered successfully!');
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setRegistering(false);
-    }
-  };
-
-  if (loading) return <LoadingScreen label="Loading vehicle info…" />;
+  if (loading) return <LoadingScreen label={t('loading.vehicle')} />;
 
   return (
     <div className="animate-in">
       <div className="section-header">
         <div>
-          <h1 className="section-title">Your Vehicle</h1>
-          <p className="section-desc">Register and manage your Tesla.</p>
+          <h1 className="section-title">{t('d.vehicle.title')}</h1>
+          <p className="section-desc">{t('d.vehicle.desc')}</p>
         </div>
       </div>
 
       {error && <ErrorBanner message={error} />}
-      {success && <SuccessBanner message={success} />}
 
       {vehicle ? (
         <div className="card card--raised">
           <div className="card__header">
             <div>
-              <div className="card__title">🚗 {vehicle.modelName}</div>
-              <div className="card__subtitle">{vehicle.licensePlate}</div>
+              <div className="card__title">🛺 {vehicle.modelName}</div>
+              <div className="card__subtitle">{t('d.vehicle.teslaId')}: {vehicle.licensePlate}</div>
             </div>
-            <span className="badge badge--matched" style={{ fontSize: 12 }}>Active</span>
+            <span className="badge badge--matched" style={{ fontSize: 12 }}>{t('d.vehicle.active')}</span>
           </div>
           <div className="card__body">
             <div className="stats-row">
               <div className="stat-card">
-                <div className="stat-card__label">Total Capacity</div>
+                <div className="stat-card__label">{t('d.vehicle.capacity')}</div>
                 <div className="stat-card__value">{vehicle.seatCapacity}</div>
               </div>
               <div className="stat-card">
-                <div className="stat-card__label">Occupied Seats</div>
+                <div className="stat-card__label">{t('d.vehicle.occupied')}</div>
                 <div className="stat-card__value" style={{ color: vehicle.occupiedSeats > 0 ? 'var(--warning)' : 'var(--text-secondary)' }}>
                   {vehicle.occupiedSeats}
                 </div>
               </div>
               <div className="stat-card">
-                <div className="stat-card__label">Available Seats</div>
+                <div className="stat-card__label">{t('d.vehicle.available')}</div>
                 <div className="stat-card__value" style={{ color: 'var(--success)' }}>
                   {vehicle.seatCapacity - vehicle.occupiedSeats}
                 </div>
@@ -418,61 +441,16 @@ function VehicleTab({ driverId }: { driverId: string }) {
           </div>
         </div>
       ) : (
-        <div className="card">
-          <div className="card__header">
-            <div>
-              <div className="card__title">Register a Vehicle</div>
-              <div className="card__subtitle">You need a vehicle to accept rides.</div>
-            </div>
-          </div>
-          <div className="card__body">
-            <form onSubmit={handleRegister} style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-              <div className="form-group">
-                <label className="form-label" htmlFor="vehicle-model">Model Name</label>
-                <input
-                  id="vehicle-model"
-                  className="form-control"
-                  placeholder="e.g. Tesla Model 3"
-                  value={form.modelName}
-                  onChange={(e) => setForm({ ...form, modelName: e.target.value })}
-                  required
-                />
-              </div>
-              <div className="form-group">
-                <label className="form-label" htmlFor="vehicle-plate">License Plate</label>
-                <input
-                  id="vehicle-plate"
-                  className="form-control"
-                  placeholder="e.g. DHA-1234"
-                  value={form.licensePlate}
-                  onChange={(e) => setForm({ ...form, licensePlate: e.target.value })}
-                  required
-                />
-              </div>
-              <div className="form-group">
-                <label className="form-label" htmlFor="vehicle-seats">Seat Capacity</label>
-                <select
-                  id="vehicle-seats"
-                  className="form-control"
-                  value={form.seatCapacity}
-                  onChange={(e) => setForm({ ...form, seatCapacity: Number(e.target.value) })}
-                >
-                  {[2, 3, 4, 5, 6, 7].map((n) => (
-                    <option key={n} value={n}>{n} seats</option>
-                  ))}
-                </select>
-              </div>
-              <button
-                id="register-vehicle-submit"
-                type="submit"
-                className="btn btn--primary btn--full"
-                disabled={registering}
-              >
-                {registering ? 'Registering…' : 'Register vehicle'}
-              </button>
-            </form>
-          </div>
-        </div>
+        <EmptyState
+          icon="🛺"
+          title={t('d.vehicle.noneTitle')}
+          description={t('d.vehicle.noneDesc')}
+          action={
+            <button className="btn btn--primary" id="vehicle-start-onboarding" onClick={() => router.push('/driver/onboarding')}>
+              {t('d.onboard.cta')}
+            </button>
+          }
+        />
       )}
     </div>
   );
@@ -480,6 +458,7 @@ function VehicleTab({ driverId }: { driverId: string }) {
 
 // ─── History Tab ───────────────────────────────────────────────────────────
 function HistoryTab({ driverId }: { driverId: string }) {
+  const { t, tz, locale } = usePreferences();
   const [rides, setRides] = useState<Ride[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -491,7 +470,7 @@ function HistoryTab({ driverId }: { driverId: string }) {
       .finally(() => setLoading(false));
   }, [driverId]);
 
-  if (loading) return <LoadingScreen label="Loading trip history…" />;
+  if (loading) return <LoadingScreen label={t('loading.trips')} />;
 
   const completed = rides.filter((r) => r.status === 'COMPLETED');
   const totalEarned = completed.reduce((s, r) => s + r.estimatedFare, 0);
@@ -500,8 +479,8 @@ function HistoryTab({ driverId }: { driverId: string }) {
     <div className="animate-in">
       <div className="section-header">
         <div>
-          <h1 className="section-title">Trip History</h1>
-          <p className="section-desc">All your completed and cancelled trips.</p>
+          <h1 className="section-title">{t('d.history.title')}</h1>
+          <p className="section-desc">{t('d.history.desc')}</p>
         </div>
       </div>
 
@@ -510,15 +489,15 @@ function HistoryTab({ driverId }: { driverId: string }) {
       {rides.length > 0 && (
         <div className="stats-row" style={{ marginBottom: 24 }}>
           <div className="stat-card">
-            <div className="stat-card__label">Total trips</div>
+            <div className="stat-card__label">{t('d.history.total')}</div>
             <div className="stat-card__value">{rides.length}</div>
           </div>
           <div className="stat-card">
-            <div className="stat-card__label">Completed</div>
+            <div className="stat-card__label">{t('common.completed')}</div>
             <div className="stat-card__value" style={{ color: 'var(--success)' }}>{completed.length}</div>
           </div>
           <div className="stat-card">
-            <div className="stat-card__label">Total earned</div>
+            <div className="stat-card__label">{t('d.history.earned')}</div>
             <div className="stat-card__value">৳{(totalEarned / 100).toFixed(0)}</div>
           </div>
         </div>
@@ -527,28 +506,28 @@ function HistoryTab({ driverId }: { driverId: string }) {
       {rides.length === 0 ? (
         <EmptyState
           icon="🕓"
-          title="No trip history yet"
-          description="Completed trips will appear here."
+          title={t('d.history.emptyTitle')}
+          description={t('d.history.emptyDesc')}
         />
       ) : (
         <div className="ride-list">
           {rides.map((ride) => (
             <div key={ride.id} className="ride-card">
               <div className="ride-card__route">
-                <span className="ride-card__zone">{ride.pickupZone}</span>
+                <span className="ride-card__zone">{tz(ride.pickupZone)}</span>
                 <span className="ride-card__arrow">→</span>
-                <span className="ride-card__zone">{ride.destinationZone}</span>
+                <span className="ride-card__zone">{tz(ride.destinationZone)}</span>
                 <StatusBadge status={ride.status} />
               </div>
               <div className="ride-card__meta">
                 <span className="ride-card__meta-item">
-                  <strong>{ride.seatCount}</strong> seat{ride.seatCount > 1 ? 's' : ''}
+                  <SeatCount n={ride.seatCount} />
                 </span>
                 <span className="ride-card__meta-item">
-                  Fare: <strong>৳{ride.estimatedFareBDT}</strong>
+                  {t('common.fare')} <strong>৳{ride.estimatedFareBDT}</strong>
                 </span>
                 <span className="ride-card__meta-item" style={{ color: 'var(--text-muted)' }}>
-                  {new Date(ride.updatedAt).toLocaleDateString('en-BD', {
+                  {new Date(ride.updatedAt).toLocaleDateString(locale, {
                     day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
                   })}
                 </span>

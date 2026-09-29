@@ -1,6 +1,8 @@
 import { Router, Request, Response } from 'express';
+import { Op } from 'sequelize';
 import { User, RideRequest, Vehicle } from '../models';
 import { validateTransition, RideStatus } from '../models/RideRequest';
+import { recalculatePoolFares } from './rideRequest';
 
 const router = Router();
 
@@ -35,7 +37,11 @@ async function resolvePassenger(passengerId: string | undefined, res: Response) 
     return null;
   }
   const passenger = await User.findByPk(passengerId);
-  if (!passenger || passenger.role !== 'PASSENGER') {
+  if (!passenger) {
+    res.status(401).json({ error: 'Passenger not found. Please log in again.' });
+    return null;
+  }
+  if (passenger.role !== 'PASSENGER') {
     res.status(403).json({ error: 'Only passengers can perform this action.' });
     return null;
   }
@@ -67,9 +73,68 @@ async function findOwnedRide(rideId: string, passengerId: string, res: Response)
 }
 
 // ---------------------------------------------------------------------------
+// Helper: enrich a RideRequest with vehicle, driver name, and pool info.
+// Returns ONLY the requesting passenger's own data — no co-passenger PII.
+// ---------------------------------------------------------------------------
+async function enrichRide(ride: any) {
+  let vehicleInfo = null;
+  let driverName: string | null = null;
+  let coPassengers = 0;
+  let poolDiscountApplied = false;
+
+  if (ride.vehicleId) {
+    const vehicle: any = await Vehicle.findByPk(ride.vehicleId, {
+      attributes: ['id', 'modelName', 'licensePlate', 'seatCapacity', 'occupiedSeats'],
+    });
+    vehicleInfo = vehicle ? vehicle.toJSON() : null;
+
+    // Count co-passengers (excluding this passenger) — count only, no PII
+    const poolCount = await RideRequest.count({
+      where: {
+        vehicleId: ride.vehicleId,
+        status: { [Op.notIn]: ['CANCELLED', 'COMPLETED'] },
+      },
+    });
+    coPassengers = Math.max(0, poolCount - 1);
+    poolDiscountApplied = poolCount >= 2;
+  }
+
+  if (ride.driverId) {
+    const driver: any = await User.findByPk(ride.driverId, {
+      attributes: ['name'],
+    });
+    driverName = driver?.name ?? null;
+  }
+
+  return {
+    id: ride.id,
+    passengerId: ride.passengerId,
+    pickupZone: ride.pickupZone,
+    destinationZone: ride.destinationZone,
+    seatCount: ride.seatCount,
+    baseFare: ride.baseFare,
+    estimatedFare: ride.estimatedFare,
+    estimatedFareBDT: (ride.estimatedFare / 100).toFixed(2),
+    poolDiscount: ride.poolDiscount,
+    poolDiscountBDT: (ride.poolDiscount / 100).toFixed(2),
+    status: ride.status,
+    vehicle: vehicleInfo,
+    driverName,
+    coPassengers,
+    poolDiscountApplied,
+    isSharedRide: coPassengers > 0,
+    canCancel: PASSENGER_CANCELLABLE.includes(ride.status as RideStatus),
+    createdAt: ride.createdAt,
+    updatedAt: ride.updatedAt,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // GET /passenger/rides/active?passengerId=...
 // Passenger tracks live status of their current (non-terminal) ride(s).
-// Returns the ride status, vehicle info if matched, and estimated fare.
+// Returns the ride status, vehicle info, driver name, pool co-passenger count,
+// fare (with discount if pool applies), and "shared ride" flag.
+// Does NOT reveal other passengers' fares or PII.
 // ---------------------------------------------------------------------------
 router.get('/rides/active', async (req: Request, res: Response) => {
   try {
@@ -80,41 +145,56 @@ router.get('/rides/active', async (req: Request, res: Response) => {
     const activeRides = await RideRequest.findAll({
       where: {
         passengerId,
-        status: ['REQUESTED', 'MATCHED', 'DRIVER_ARRIVED', 'STARTED'],
+        status: { [Op.in]: ['REQUESTED', 'MATCHED', 'DRIVER_ARRIVED', 'STARTED'] },
       },
       order: [['createdAt', 'DESC']],
     });
 
-    // Enrich with vehicle details if the ride has been matched
-    const enriched = await Promise.all(
-      activeRides.map(async (ride: any) => {
-        let vehicleInfo = null;
-        if (ride.vehicleId) {
-          const vehicle: any = await Vehicle.findByPk(ride.vehicleId, {
-            attributes: ['id', 'modelName', 'licensePlate', 'seatCapacity'],
-          });
-          vehicleInfo = vehicle ? vehicle.toJSON() : null;
-        }
-
-        return {
-          id: ride.id,
-          pickupZone: ride.pickupZone,
-          destinationZone: ride.destinationZone,
-          seatCount: ride.seatCount,
-          estimatedFare: ride.estimatedFare,
-          estimatedFareBDT: (ride.estimatedFare / 100).toFixed(2),
-          status: ride.status,
-          vehicle: vehicleInfo,
-          canCancel: PASSENGER_CANCELLABLE.includes(ride.status as RideStatus),
-          createdAt: ride.createdAt,
-          updatedAt: ride.updatedAt,
-        };
-      })
-    );
-
+    const enriched = await Promise.all(activeRides.map(enrichRide));
     res.json({ rides: enriched });
   } catch (error) {
     console.error('Passenger active rides error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /passenger/rides/history?passengerId=...
+// Passenger views their completed and cancelled ride history.
+// ---------------------------------------------------------------------------
+router.get('/rides/history', async (req: Request, res: Response) => {
+  try {
+    const passengerId = req.query.passengerId as string;
+    const passenger = await resolvePassenger(passengerId, res);
+    if (!passenger) return;
+
+    const history = await RideRequest.findAll({
+      where: {
+        passengerId,
+        status: { [Op.in]: ['COMPLETED', 'CANCELLED'] },
+      },
+      order: [['updatedAt', 'DESC']],
+    });
+
+    res.json({
+      rides: history.map((r: any) => ({
+        id: r.id,
+        pickupZone: r.pickupZone,
+        destinationZone: r.destinationZone,
+        seatCount: r.seatCount,
+        baseFare: r.baseFare,
+        estimatedFare: r.estimatedFare,
+        estimatedFareBDT: (r.estimatedFare / 100).toFixed(2),
+        poolDiscount: r.poolDiscount,
+        poolDiscountBDT: (r.poolDiscount / 100).toFixed(2),
+        status: r.status,
+        vehicleId: r.vehicleId,
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
+      })),
+    });
+  } catch (error) {
+    console.error('Passenger history error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -135,69 +215,9 @@ router.get('/rides/:id', async (req: Request, res: Response) => {
     const ride: any = await findOwnedRide(rideId, passengerId, res);
     if (!ride) return;
 
-    let vehicleInfo = null;
-    if (ride.vehicleId) {
-      const vehicle: any = await Vehicle.findByPk(ride.vehicleId, {
-        attributes: ['id', 'modelName', 'licensePlate', 'seatCapacity'],
-      });
-      vehicleInfo = vehicle ? vehicle.toJSON() : null;
-    }
-
-    res.json({
-      ride: {
-        id: ride.id,
-        pickupZone: ride.pickupZone,
-        destinationZone: ride.destinationZone,
-        seatCount: ride.seatCount,
-        estimatedFare: ride.estimatedFare,
-        estimatedFareBDT: (ride.estimatedFare / 100).toFixed(2),
-        status: ride.status,
-        vehicle: vehicleInfo,
-        canCancel: PASSENGER_CANCELLABLE.includes(ride.status as RideStatus),
-        createdAt: ride.createdAt,
-        updatedAt: ride.updatedAt,
-      },
-    });
+    res.json({ ride: await enrichRide(ride) });
   } catch (error) {
     console.error('Passenger get ride error:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// ---------------------------------------------------------------------------
-// GET /passenger/rides/history?passengerId=...
-// Passenger views their completed and cancelled ride history.
-// ---------------------------------------------------------------------------
-router.get('/rides/history', async (req: Request, res: Response) => {
-  try {
-    const passengerId = req.query.passengerId as string;
-    const passenger = await resolvePassenger(passengerId, res);
-    if (!passenger) return;
-
-    const history = await RideRequest.findAll({
-      where: {
-        passengerId,
-        status: ['COMPLETED', 'CANCELLED'],
-      },
-      order: [['updatedAt', 'DESC']],
-    });
-
-    res.json({
-      rides: history.map((r: any) => ({
-        id: r.id,
-        pickupZone: r.pickupZone,
-        destinationZone: r.destinationZone,
-        seatCount: r.seatCount,
-        estimatedFare: r.estimatedFare,
-        estimatedFareBDT: (r.estimatedFare / 100).toFixed(2),
-        status: r.status,
-        vehicleId: r.vehicleId,
-        createdAt: r.createdAt,
-        updatedAt: r.updatedAt,
-      })),
-    });
-  } catch (error) {
-    console.error('Passenger history error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -207,6 +227,11 @@ router.get('/rides/history', async (req: Request, res: Response) => {
 // Passenger cancels their own ride.
 // Only allowed in REQUESTED or MATCHED states (see rationale at top of file).
 // A 404 is returned for rides belonging to other passengers (no enumeration).
+//
+// POOL FARE RECALCULATION:
+//   If the cancelled ride was part of a pool (vehicleId set), we release its
+//   seats and immediately recalculate the remaining pool passengers' fares.
+//   If only 1 passenger remains, their discount is removed (back to baseFare).
 // ---------------------------------------------------------------------------
 router.patch('/rides/:id/cancel', async (req: Request, res: Response) => {
   try {
@@ -219,7 +244,7 @@ router.patch('/rides/:id/cancel', async (req: Request, res: Response) => {
     const ride: any = await findOwnedRide(rideId, passengerId, res);
     if (!ride) return;
 
-    // State-machine guard — use the same validateTransition as driver routes
+    // State-machine guard
     const machineErr = validateTransition(ride.status as RideStatus, 'CANCELLED');
     if (machineErr) {
       res.status(409).json({ error: machineErr });
@@ -237,17 +262,23 @@ router.patch('/rides/:id/cancel', async (req: Request, res: Response) => {
     const { sequelize } = require('../models/index');
 
     await sequelize.transaction(async (t: any) => {
+      // 1. Mark this ride cancelled
       await RideRequest.update(
         { status: 'CANCELLED' },
         { where: { id: rideId, passengerId }, transaction: t }
       );
 
-      // If already matched to a vehicle, release the reserved seats
       if (ride.vehicleId) {
+        // 2. Release the reserved seats
         await Vehicle.update(
           { occupiedSeats: sequelize.literal(`MAX(0, occupiedSeats - ${ride.seatCount})`) },
           { where: { id: ride.vehicleId }, transaction: t }
         );
+
+        // 3. Recalculate fares for the remaining pool passengers.
+        //    recalculatePoolFares() will NOT include this now-CANCELLED ride
+        //    because it filters by non-terminal statuses.
+        await recalculatePoolFares(ride.vehicleId, sequelize, t);
       }
     });
 

@@ -32,5 +32,9 @@ yarn-error.log*
 
 # SQLite
 *.sqlite
+# Database backups written by the startup migration
+server/data/*.bak
+# Driver profile pictures (personal photos)
+server/data/uploads/
 *.db
 *.db-journal

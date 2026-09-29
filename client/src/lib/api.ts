@@ -1,28 +1,47 @@
 // ─── Typed API client ──────────────────────────────────────────────────────
 // All calls go through this module so the base URL is always consistent.
+import { clearAuth, getToken } from './auth';
 
 const BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(
+    public status: number,
+    message: string,
+    /** Machine-readable reason from the server, e.g. NID_TAKEN. */
+    public code?: string,
+    /** Per-field messages from the server, keyed by form field. */
+    public fields?: Record<string, string>
+  ) {
     super(message);
   }
 }
+
+/** Turns a server-relative path such as /uploads/x.png into a full URL. */
+export const assetUrl = (path: string) => `${BASE}${path}`;
 
 async function request<T>(
   path: string,
   options: RequestInit = {}
 ): Promise<T> {
+  const token = getToken();
   const res = await fetch(`${BASE}${path}`, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
+      // Endpoints that hold private data (driver onboarding) identify the caller by this token.
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(options.headers || {}),
     },
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new ApiError(res.status, data.error || `HTTP ${res.status}`);
+    // A 401 from /auth/* is just "wrong credentials" — show it on the form instead of reloading.
+    if (res.status === 401 && !path.startsWith('/auth/') && typeof window !== 'undefined') {
+      clearAuth();
+      window.location.href = '/auth';
+    }
+    throw new ApiError(res.status, data.error || `HTTP ${res.status}`, data.code, data.fields);
   }
   return data as T;
 }
@@ -42,8 +61,38 @@ export type RideStatus =
 export interface User {
   id: string;
   name: string;
+  phone?: string | null;
+  email?: string | null;
   role: Role;
   isOnline?: boolean;
+}
+
+export interface OnboardingProfile {
+  /** Public driver ID, e.g. DTP-0001 */
+  driverCode: string;
+  nickname: string | null;
+  seatCapacity: number | null;
+  homeZone: string;
+  /** NID with all but the last 4 digits hidden — the full number is never sent back. */
+  nidMasked: string;
+  profilePictureUrl: string | null;
+}
+
+export interface OnboardingState {
+  driver: { name: string; phone: string | null };
+  zones: string[];
+  onboarded: boolean;
+  profile: OnboardingProfile | null;
+  existingVehicle: { nickname: string; seatCapacity: number } | null;
+}
+
+export interface OnboardingInput {
+  nickname: string;
+  seatCapacity: number;
+  homeZone: string;
+  nid: string;
+  /** `data:image/png;base64,…` or `data:image/jpeg;base64,…` */
+  profilePicture?: string;
 }
 
 export interface Ride {
@@ -51,8 +100,14 @@ export interface Ride {
   pickupZone: string;
   destinationZone: string;
   seatCount: number;
+  /** Solo fare before any pool discount (paisa) */
+  baseFare?: number;
+  /** Current fare after applying/removing pool discount (paisa) */
   estimatedFare: number;
   estimatedFareBDT: string;
+  /** Pool discount applied to this passenger (paisa). 0 if solo. */
+  poolDiscount?: number;
+  poolDiscountBDT?: string;
   status: RideStatus;
   canCancel?: boolean;
   vehicle?: {
@@ -64,6 +119,13 @@ export interface Ride {
   } | null;
   driverId?: string;
   vehicleId?: string;
+  /** Driver's display name — shown to passenger only when matched */
+  driverName?: string | null;
+  /** Number of other passengers sharing this vehicle (no PII) */
+  coPassengers?: number;
+  /** True when 2+ passengers share this vehicle */
+  isSharedRide?: boolean;
+  poolDiscountApplied?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -80,16 +142,30 @@ export interface Vehicle {
 // ─── Auth ────────────────────────────────────────────────────────────────────
 
 export const authApi = {
-  signup: (name: string, email: string, password: string, role: Role) =>
+  /** `phone` is required; `email` is optional and omitted when blank. */
+  signup: (name: string, phone: string, email: string, password: string, role: Role) =>
     request<{ token: string; user: User }>('/auth/signup', {
       method: 'POST',
-      body: JSON.stringify({ name, email, password, role }),
+      body: JSON.stringify({ name, phone, email: email || undefined, password, role }),
     }),
 
-  login: (email: string, password: string) =>
+  login: (phone: string, password: string) =>
     request<{ token: string; user: User }>('/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ phone, password }),
+    }),
+
+  /** Sends a reset code by SMS. `devCode` is only present on non-production servers. */
+  forgotPassword: (phone: string) =>
+    request<{ message: string; expiresInMinutes: number; devCode?: string }>('/auth/forgot-password', {
+      method: 'POST',
+      body: JSON.stringify({ phone }),
+    }),
+
+  resetPassword: (phone: string, code: string, newPassword: string) =>
+    request<{ message: string }>('/auth/reset-password', {
+      method: 'POST',
+      body: JSON.stringify({ phone, code, newPassword }),
     }),
 };
 
@@ -127,6 +203,14 @@ export const passengerApi = {
 // ─── Driver APIs ─────────────────────────────────────────────────────────────
 
 export const driverApi = {
+  getOnboarding: () => request<OnboardingState>('/driver/onboarding'),
+
+  submitOnboarding: (input: OnboardingInput) =>
+    request<{ message: string; profile: OnboardingProfile }>('/driver/onboarding', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
   // Backend: PUT /driver/:id/status  { isOnline: boolean }
   setOnlineStatus: (driverId: string, isOnline: boolean) =>
     request<{ isOnline: boolean; message: string }>(`/driver/${driverId}/status`, {
@@ -135,15 +219,21 @@ export const driverApi = {
     // Normalise response: the driver page expects res.user.isOnline
     }).then(r => ({ user: { isOnline: r.isOnline } as User })),
 
-  // Backend returns { requests }, we normalise to { rides }
+  // Backend returns { requests }, we normalise to { rides }.
+  // The backend answers 404 when the driver has no active vehicle yet. That is a normal
+  // state for a new driver, not a failure, so it is reported as `noVehicle` instead.
   getPendingRides: (driverId: string) =>
     request<{ requests: Ride[] }>(`/ride-requests/pending?driverId=${driverId}`)
-      .then(r => ({ rides: r.requests.map((req: any) => ({
+      .then(r => ({ noVehicle: false, rides: r.requests.map((req: any) => ({
         ...req,
         estimatedFareBDT: (req.estimatedFare / 100).toFixed(2),
         createdAt: req.createdAt ?? new Date().toISOString(),
         updatedAt: req.updatedAt ?? new Date().toISOString(),
-      }))})),
+      }))}))
+      .catch(err => {
+        if (err instanceof ApiError && err.status === 404) return { noVehicle: true, rides: [] as Ride[] };
+        throw err;
+      }),
 
   acceptRide: (rideId: string, driverId: string) =>
     request<{ message: string; ride: Ride }>(`/ride-requests/${rideId}/accept`, {

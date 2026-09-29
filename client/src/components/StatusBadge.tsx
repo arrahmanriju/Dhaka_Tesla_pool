@@ -1,34 +1,28 @@
 'use client';
 import type { RideStatus } from '@/lib/api';
-
-const LABELS: Record<RideStatus, string> = {
-  REQUESTED: 'Requested',
-  MATCHED: 'Matched',
-  DRIVER_ARRIVED: 'Driver Arrived',
-  STARTED: 'In Progress',
-  COMPLETED: 'Completed',
-  CANCELLED: 'Cancelled',
-};
+import { usePreferences } from '@/lib/preferences';
+import type { TranslationKey } from '@/lib/translations';
 
 const PULSE_STATES: RideStatus[] = ['REQUESTED', 'MATCHED', 'DRIVER_ARRIVED', 'STARTED'];
 
 export function StatusBadge({ status }: { status: RideStatus }) {
+  const { t } = usePreferences();
   const isPulse = PULSE_STATES.includes(status);
   return (
     <span className={`badge badge--${status.toLowerCase()}`}>
       <span className={`badge__dot${isPulse ? ' badge__dot--pulse' : ''}`} />
-      {LABELS[status]}
+      {t(`status.${status}`)}
     </span>
   );
 }
 
 // ─── Status Timeline ───────────────────────────────────────────────────────
-const STEPS: { status: RideStatus; label: string; icon: string }[] = [
-  { status: 'REQUESTED',     label: 'Requested',  icon: '📋' },
-  { status: 'MATCHED',       label: 'Matched',    icon: '🔗' },
-  { status: 'DRIVER_ARRIVED',label: 'Arrived',    icon: '📍' },
-  { status: 'STARTED',       label: 'Started',    icon: '🚗' },
-  { status: 'COMPLETED',     label: 'Done',       icon: '✅' },
+const STEPS: { status: RideStatus; label: TranslationKey; icon: string }[] = [
+  { status: 'REQUESTED',     label: 'timeline.requested', icon: '📋' },
+  { status: 'MATCHED',       label: 'timeline.matched',   icon: '🔗' },
+  { status: 'DRIVER_ARRIVED',label: 'timeline.arrived',   icon: '📍' },
+  { status: 'STARTED',       label: 'timeline.started',   icon: '🛺' },
+  { status: 'COMPLETED',     label: 'timeline.done',      icon: '✅' },
 ];
 
 const ORDER: Record<string, number> = {
@@ -36,10 +30,11 @@ const ORDER: Record<string, number> = {
 };
 
 export function StatusTimeline({ status }: { status: RideStatus }) {
+  const { t } = usePreferences();
   if (status === 'CANCELLED') {
     return (
       <div className="error-banner" style={{ justifyContent: 'center' }}>
-        ✕ Ride Cancelled
+        {t('timeline.cancelled')}
       </div>
     );
   }
@@ -71,7 +66,7 @@ export function StatusTimeline({ status }: { status: RideStatus }) {
                   isActive ? 'status-step__label--active' : '',
                 ].join(' ')}
               >
-                {step.label}
+                {t(step.label)}
               </span>
             </div>
             {i < STEPS.length - 1 && (

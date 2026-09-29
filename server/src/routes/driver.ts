@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
-import { User, Vehicle, RideRequest } from '../models';
+import { Op } from 'sequelize';
+import { User, Vehicle, RideRequest, DriverProfile } from '../models';
 import { validateTransition, RideStatus } from '../models/RideRequest';
 
 const router = Router();
@@ -23,6 +24,15 @@ router.put('/:id/status', async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'Only drivers can update their status.' });
     }
 
+    // A driver must finish onboarding (vehicle, NID, home zone) before going online.
+    // Going offline is always allowed.
+    if (isOnline && !(await DriverProfile.findOne({ where: { userId: user.id } }))) {
+      return res.status(403).json({
+        error: 'Complete driver onboarding before going online.',
+        code: 'ONBOARDING_REQUIRED',
+      });
+    }
+
     user.isOnline = isOnline;
     await user.save();
 
@@ -42,7 +52,11 @@ async function resolveDriver(driverId: string | undefined, res: Response) {
     return null;
   }
   const driver = await User.findByPk(driverId);
-  if (!driver || driver.role !== 'DRIVER') {
+  if (!driver) {
+    res.status(401).json({ error: 'Driver not found. Please log in again.' });
+    return null;
+  }
+  if (driver.role !== 'DRIVER') {
     res.status(403).json({ error: 'Only drivers can perform this action.' });
     return null;
   }
@@ -214,7 +228,6 @@ router.get('/rides/active', async (req: Request, res: Response) => {
       order: [['createdAt', 'ASC']],
     });
 
-    // Summarise occupied seats for each ride
     const summary = activeRides.map((r: any) => ({
       id: r.id,
       passengerId: r.passengerId,
@@ -222,12 +235,29 @@ router.get('/rides/active', async (req: Request, res: Response) => {
       destinationZone: r.destinationZone,
       seatCount: r.seatCount,
       status: r.status,
+      baseFare: r.baseFare,
       estimatedFare: r.estimatedFare,
+      estimatedFareBDT: (r.estimatedFare / 100).toFixed(2),
+      poolDiscount: r.poolDiscount,
+      poolDiscountBDT: (r.poolDiscount / 100).toFixed(2),
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
     }));
 
     const totalOccupied = activeRides.reduce((sum: number, r: any) => sum + r.seatCount, 0);
 
-    res.json({ rides: summary, totalOccupiedSeats: totalOccupied });
+    // Get vehicle info for pool capacity display
+    const vehicle: any = await Vehicle.findOne({ where: { driverId, isActive: true } });
+    const vehicleInfo = vehicle ? {
+      id: vehicle.id,
+      modelName: vehicle.modelName,
+      licensePlate: vehicle.licensePlate,
+      seatCapacity: vehicle.seatCapacity,
+      occupiedSeats: vehicle.occupiedSeats,
+      availableSeats: vehicle.seatCapacity - vehicle.occupiedSeats,
+    } : null;
+
+    res.json({ rides: summary, totalOccupiedSeats: totalOccupied, vehicle: vehicleInfo });
   } catch (error) {
     console.error('Get active rides error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -252,9 +282,78 @@ router.get('/rides/history', async (req: Request, res: Response) => {
       order: [['updatedAt', 'DESC']],
     });
 
-    res.json({ rides: history });
+    res.json({
+      rides: history.map((r: any) => ({
+        id: r.id,
+        passengerId: r.passengerId,
+        pickupZone: r.pickupZone,
+        destinationZone: r.destinationZone,
+        seatCount: r.seatCount,
+        baseFare: r.baseFare,
+        estimatedFare: r.estimatedFare,
+        estimatedFareBDT: (r.estimatedFare / 100).toFixed(2),
+        poolDiscount: r.poolDiscount,
+        status: r.status,
+        vehicleId: r.vehicleId,
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
+      })),
+    });
   } catch (error) {
     console.error('Get ride history error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /driver/rides/pool?driverId=...
+// Driver views the current pool summary: all active passengers grouped by
+// vehicle, with seat counts and per-passenger status.
+// Does NOT expose passenger PII beyond seat counts and statuses.
+// ---------------------------------------------------------------------------
+router.get('/rides/pool', async (req: Request, res: Response) => {
+  try {
+    const driverId = req.query.driverId as string;
+    const driver = await resolveDriver(driverId, res);
+    if (!driver) return;
+
+    const vehicle: any = await Vehicle.findOne({ where: { driverId, isActive: true } });
+    if (!vehicle) return res.status(404).json({ error: 'No active vehicle found.' });
+
+    const poolRides: any[] = await RideRequest.findAll({
+      where: {
+        vehicleId: vehicle.id,
+        status: { [Op.notIn]: ['CANCELLED', 'COMPLETED'] },
+      },
+      order: [['createdAt', 'ASC']],
+    });
+
+    const totalSeatsUsed = poolRides.reduce((s: number, r: any) => s + r.seatCount, 0);
+
+    res.json({
+      vehicle: {
+        id: vehicle.id,
+        modelName: vehicle.modelName,
+        licensePlate: vehicle.licensePlate,
+        seatCapacity: vehicle.seatCapacity,
+        occupiedSeats: vehicle.occupiedSeats,
+        availableSeats: vehicle.seatCapacity - vehicle.occupiedSeats,
+      },
+      poolSize: poolRides.length,
+      totalSeatsUsed,
+      passengers: poolRides.map((r: any) => ({
+        rideId: r.id,
+        // No passenger name/email — only operational data
+        pickupZone: r.pickupZone,
+        destinationZone: r.destinationZone,
+        seatCount: r.seatCount,
+        status: r.status,
+        estimatedFareBDT: (r.estimatedFare / 100).toFixed(2),
+        poolDiscountBDT: (r.poolDiscount / 100).toFixed(2),
+      })),
+    });
+  } catch (error) {
+    console.error('Get pool error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
