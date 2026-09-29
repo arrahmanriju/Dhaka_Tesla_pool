@@ -24,5 +24,8 @@ Vehicle.belongsTo(User, { foreignKey: 'driverId' });
 User.hasMany(RideRequest, { foreignKey: 'passengerId', as: 'rideRequests' });
 RideRequest.belongsTo(User, { foreignKey: 'passengerId', as: 'passenger' });
 
+Vehicle.hasMany(RideRequest, { foreignKey: 'vehicleId', as: 'poolRequests' });
+RideRequest.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
+
 export { User, Vehicle, RideRequest };
 
