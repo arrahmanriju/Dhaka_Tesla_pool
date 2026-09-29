@@ -2,12 +2,13 @@ import { DataTypes, Model } from 'sequelize';
 
 
 export class User extends Model {
-  public id!: string;
-  public name!: string;
-  public role!: 'DRIVER' | 'PASSENGER';
-  public password!: string;
-  public readonly createdAt!: Date;
-  public readonly updatedAt!: Date;
+  declare id: string;
+  declare name: string;
+  declare email: string;
+  declare role: 'DRIVER' | 'PASSENGER';
+  declare password: string;
+  declare readonly createdAt: Date;
+  declare readonly updatedAt: Date;
 }
 
 export const initUser = (sequelize: any) => {
@@ -21,7 +22,14 @@ export const initUser = (sequelize: any) => {
       name: {
         type: DataTypes.STRING,
         allowNull: false,
+      },
+      email: {
+        type: DataTypes.STRING,
+        allowNull: false,
         unique: true,
+        validate: {
+          isEmail: true,
+        },
       },
       role: {
         type: DataTypes.ENUM('DRIVER', 'PASSENGER'),
@@ -38,4 +46,3 @@ export const initUser = (sequelize: any) => {
     }
   );
 };
-
