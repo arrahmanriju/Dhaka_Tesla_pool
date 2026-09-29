@@ -6,7 +6,7 @@ const router = Router();
 // Endpoint to toggle driver's online/offline status
 router.put('/:id/status', async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const { isOnline } = req.body;
 
     if (typeof isOnline !== 'boolean') {
