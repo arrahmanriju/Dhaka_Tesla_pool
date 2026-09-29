@@ -103,10 +103,10 @@ export const DHAKA_ZONES = [
 
 export const passengerApi = {
   requestRide: (passengerId: string, pickupZone: string, destinationZone: string, seatCount: number) =>
-    request<{ ride: Ride }>('/ride-request', {
+    request<{ rideRequest: Ride }>('/ride-requests', {
       method: 'POST',
       body: JSON.stringify({ passengerId, pickupZone, destinationZone, seatCount }),
-    }),
+    }).then(res => ({ ride: res.rideRequest })),
 
   getActiveRides: (passengerId: string) =>
     request<{ rides: Ride[] }>(`/passenger/rides/active?passengerId=${passengerId}`),
@@ -134,11 +134,11 @@ export const driverApi = {
     }),
 
   getPendingRides: (driverId: string) =>
-    request<{ rides: Ride[] }>(`/ride-request/pending?driverId=${driverId}`),
+    request<{ rides: Ride[] }>(`/ride-requests/pending?driverId=${driverId}`),
 
   acceptRide: (rideId: string, driverId: string) =>
-    request<{ message: string; ride: Ride }>(`/ride-request/${rideId}/accept`, {
-      method: 'PATCH',
+    request<{ message: string; ride: Ride }>(`/ride-requests/${rideId}/accept`, {
+      method: 'POST',
       body: JSON.stringify({ driverId }),
     }),
 

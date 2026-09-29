@@ -75,7 +75,11 @@ function RequestRideTab({ passengerId }: { passengerId: string }) {
       const res = await passengerApi.requestRide(passengerId, pickup, destination, seats);
       setSuccess(res.ride);
     } catch (err: any) {
-      setError(err.message);
+      if (err instanceof ApiError) {
+        setError(`Error ${err.status}: ${err.message}`);
+      } else {
+        setError(err.message || 'An unexpected error occurred');
+      }
     } finally {
       setLoading(false);
     }
