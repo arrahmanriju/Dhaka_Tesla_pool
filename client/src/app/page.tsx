@@ -2,9 +2,12 @@
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { isAuthenticated, getUser } from '@/lib/auth';
+import { usePreferences } from '@/lib/preferences';
+import { PreferenceControls } from '@/components/PreferenceControls';
 
 export default function Home() {
   const router = useRouter();
+  const { t } = usePreferences();
 
   useEffect(() => {
     if (isAuthenticated()) {
@@ -15,24 +18,24 @@ export default function Home() {
 
   return (
     <div className="hero">
+      <PreferenceControls floating />
       <div className="hero__content animate-in">
         <div className="hero__eyebrow">
           <span>⚡</span>
-          Dhaka Electric Pooling
+          {t('hero.eyebrow')}
         </div>
         <h1 className="hero__title">
-          Smart rides, <span>shared costs</span>,<br />zero emissions.
+          {t('hero.title1')} <span>{t('hero.title2')}</span>,<br />{t('hero.title3')}
         </h1>
         <p className="hero__desc">
-          The first Tesla pool network in Dhaka. Split fares across passengers going
-          the same way — powered by real-time matching across Dhaka's key zones.
+          {t('hero.desc')}
         </p>
         <div className="hero__ctas">
           <a href="/auth" className="btn btn--primary btn--lg">
-            Get started →
+            {t('hero.cta.start')}
           </a>
           <a href="/auth" className="btn btn--secondary btn--lg">
-            Sign in
+            {t('hero.cta.signin')}
           </a>
         </div>
       </div>

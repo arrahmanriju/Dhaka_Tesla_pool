@@ -13,6 +13,21 @@ export const DHAKA_ZONES = [
 
 export type DhakaZone = typeof DHAKA_ZONES[number];
 
+// ---------------------------------------------------------------------------
+// Pool compatibility: two requests are pool-compatible if they share the same
+// pickup zone AND the same destination zone.
+//
+// We intentionally keep this simple (exact zone match) rather than using
+// geographic routing. This is easy to understand, test, and extend later.
+// ---------------------------------------------------------------------------
+export function areZonesCompatible(
+  existingDestination: string,
+  newDestination: string
+): boolean {
+  // Exact match only — same destination zone required to share a pool.
+  return existingDestination === newDestination;
+}
+
 /**
  * Ride status state machine:
  *   REQUESTED → MATCHED → DRIVER_ARRIVED → STARTED → COMPLETED
@@ -47,6 +62,16 @@ export const RIDE_STATUS_VALUES: RideStatus[] = [
   'CANCELLED',
 ];
 
+/**
+ * Pool-joinable states: a driver can pool a new passenger onto a trip that
+ * is in one of these states. Once the trip has STARTED no new passengers
+ * are added.
+ *
+ * We include STARTED here so the pool-compatibility query finds it;
+ * the accept route then checks r.status === 'STARTED' and rejects.
+ */
+export const POOL_JOINABLE_STATUSES: RideStatus[] = ['MATCHED', 'DRIVER_ARRIVED', 'STARTED'];
+
 /** Returns null if the transition is allowed; an error string if not. */
 export function validateTransition(from: RideStatus, to: RideStatus): string | null {
   const allowed: Record<RideStatus, RideStatus[]> = {
@@ -70,10 +95,25 @@ export class RideRequest extends Model {
   public passengerId!: string;
   public driverId!: string | null;       // populated when MATCHED
   public vehicleId!: string | null;      // populated when MATCHED
+
   public pickupZone!: string;
   public destinationZone!: string;
   public seatCount!: number;
-  public estimatedFare!: number;         // integer paisa (100 paisa = 1 BDT)
+
+  /** Full fare before pool discount — integer paisa. Set at creation; never changes. */
+  public baseFare!: number;
+
+  /**
+   * Final fare charged to this passenger — integer paisa.
+   * Recalculated whenever pool membership changes:
+   *   - When a second passenger joins → reduced by POOL_DISCOUNT
+   *   - When solo again (co-passenger cancelled) → reverted to baseFare
+   */
+  public estimatedFare!: number;
+
+  /** Pool discount applied to this passenger — integer paisa. 0 when riding alone. */
+  public poolDiscount!: number;
+
   public status!: RideStatus;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
@@ -115,9 +155,20 @@ export const initRideRequest = (sequelize: any) => {
         allowNull: false,
         validate: { min: 1 },
       },
-      estimatedFare: {
-        type: DataTypes.INTEGER,  // paisa
+      baseFare: {
+        type: DataTypes.INTEGER, // paisa — set at creation, never changes
         allowNull: false,
+        defaultValue: 0,
+      },
+      estimatedFare: {
+        type: DataTypes.INTEGER, // paisa — recalculated when pool changes
+        allowNull: false,
+        defaultValue: 0,
+      },
+      poolDiscount: {
+        type: DataTypes.INTEGER, // paisa discount applied to this passenger
+        allowNull: false,
+        defaultValue: 0,
       },
       status: {
         type: DataTypes.ENUM(...RIDE_STATUS_VALUES),

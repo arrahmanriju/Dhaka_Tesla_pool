@@ -1,14 +1,16 @@
 'use client';
+import { usePreferences } from '@/lib/preferences';
 
 export function Spinner({ size = 'sm' }: { size?: 'sm' | 'lg' }) {
   return <span className={`spinner${size === 'lg' ? ' spinner--lg' : ''}`} />;
 }
 
-export function LoadingScreen({ label = 'Loading…' }: { label?: string }) {
+export function LoadingScreen({ label }: { label?: string }) {
+  const { t } = usePreferences();
   return (
     <div className="loading-container">
       <Spinner size="lg" />
-      <p>{label}</p>
+      <p>{label ?? t('loading.default')}</p>
     </div>
   );
 }
@@ -45,4 +47,15 @@ export function ErrorBanner({ message }: { message: string }) {
 
 export function SuccessBanner({ message }: { message: string }) {
   return <div className="success-banner">✓ {message}</div>;
+}
+
+/** Bold seat count followed by a localised unit, e.g. "<b>2</b> seats" / "<b>2</b>টি সিট". */
+export function SeatCount({ n }: { n: number }) {
+  const { tp } = usePreferences();
+  return (
+    <>
+      <strong>{n}</strong>
+      {tp('seatUnit', n)}
+    </>
+  );
 }
