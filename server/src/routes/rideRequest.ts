@@ -92,13 +92,11 @@ router.get('/pending', async (req: Request, res: Response) => {
     
     // Find current active pooled requests for this vehicle
     const pooledRequests = await RideRequest.findAll({
-      where: { vehicleId: vehicle.id, status: 'ACCEPTED' },
+      where: { vehicleId: vehicle.id, status: 'MATCHED' },
     });
 
     const whereClause: any = {
-      status: 'PENDING',
-      // We can't easily express "seatCount <= availableSeats" in basic Sequelize shorthand without Op, 
-      // but we can just filter in memory for MVP, or use Op.lte.
+      status: 'REQUESTED',
     };
 
     if (pooledRequests.length > 0) {
@@ -137,8 +135,8 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
     if (!vehicle) return res.status(404).json({ error: 'No active vehicle found' });
 
     const request: any = await RideRequest.findByPk(id);
-    if (!request || request.status !== 'PENDING') {
-      return res.status(400).json({ error: 'Request not found or not pending.' });
+    if (!request || request.status !== 'REQUESTED') {
+      return res.status(400).json({ error: 'Request not found or not in REQUESTED state.' });
     }
 
     // CONCURRENCY MECHANISM:
@@ -169,11 +167,11 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
         throw new Error('CAPACITY_EXCEEDED');
       }
 
-      // 2. Double check the ride request wasn't taken concurrently
+      // 2. Atomically set MATCHED + assign driverId — fails if already taken concurrently
       const [reqUpdatedCount] = await RideRequest.update(
-        { status: 'ACCEPTED', vehicleId: vehicle.id },
+        { status: 'MATCHED', vehicleId: vehicle.id, driverId },
         { 
-          where: { id: request.id, status: 'PENDING' },
+          where: { id: request.id, status: 'REQUESTED' },
           transaction: t
         }
       );

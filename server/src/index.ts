@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import authRoutes from './routes/auth';
 import vehicleRoutes from './routes/vehicle';
 import rideRequestRoutes from './routes/rideRequest';
+import driverRoutes from './routes/driver';
 import { sequelize } from './models';
 
 dotenv.config();
@@ -20,8 +21,11 @@ app.use('/auth', authRoutes);
 // Vehicle routes
 app.use('/vehicle', vehicleRoutes);
 
-// Ride Request routes
+// Ride Request routes (passenger creates + views, driver accepts)
 app.use('/ride-requests', rideRequestRoutes);
+
+// Driver flow routes (arrive, start, complete, cancel, view passengers, history)
+app.use('/driver', driverRoutes);
 
 // Health check endpoint
 app.get('/health', (req: Request, res: Response) => {
