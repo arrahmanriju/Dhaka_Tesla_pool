@@ -7,9 +7,11 @@ import styles from './page.module.css';
 export default function AuthPage() {
   const [isLogin, setIsLogin] = useState(true);
   const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [role, setRole] = useState<'PASSENGER' | 'DRIVER'>('PASSENGER');
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
   const router = useRouter();
 
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
@@ -17,9 +19,12 @@ export default function AuthPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setLoading(true);
 
     const endpoint = isLogin ? '/auth/login' : '/auth/signup';
-    const payload = isLogin ? { name, password } : { name, password, role };
+    const payload = isLogin
+      ? { email, password }
+      : { name, email, password, role };
 
     try {
       const res = await fetch(`${API_URL}${endpoint}`, {
@@ -34,14 +39,14 @@ export default function AuthPage() {
         throw new Error(data.error || 'Authentication failed');
       }
 
-      // Store token and user data
       localStorage.setItem('token', data.token);
       localStorage.setItem('user', JSON.stringify(data.user));
 
-      // Redirect to dashboard (to be built later)
       router.push('/dashboard');
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Something went wrong');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -49,19 +54,36 @@ export default function AuthPage() {
     <div className={styles.container}>
       <div className={styles.card}>
         <h1 className={styles.title}>{isLogin ? 'Welcome Back' : 'Create Account'}</h1>
-        
-        {error && <div className={styles.error}>{error}</div>}
 
-        <form onSubmit={handleSubmit} className={styles.form}>
+        {error && <div className={styles.error} role="alert">{error}</div>}
+
+        <form onSubmit={handleSubmit} className={styles.form} noValidate>
+          {/* Name — signup only */}
+          {!isLogin && (
+            <div className={styles.inputGroup}>
+              <label htmlFor="name">Full Name</label>
+              <input
+                id="name"
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                required={!isLogin}
+                placeholder="e.g. Nusrat Jahan"
+                autoComplete="name"
+              />
+            </div>
+          )}
+
           <div className={styles.inputGroup}>
-            <label htmlFor="name">Name</label>
+            <label htmlFor="email">Email</label>
             <input
-              id="name"
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
+              id="email"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
               required
-              placeholder="e.g. Nusrat"
+              placeholder="you@example.com"
+              autoComplete="email"
             />
           </div>
 
@@ -73,12 +95,15 @@ export default function AuthPage() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
+              placeholder={isLogin ? '' : 'Min 8 chars, letters + numbers'}
+              autoComplete={isLogin ? 'current-password' : 'new-password'}
             />
           </div>
 
+          {/* Role — signup only */}
           {!isLogin && (
             <div className={styles.inputGroup}>
-              <label htmlFor="role">Role</label>
+              <label htmlFor="role">I am a</label>
               <select
                 id="role"
                 value={role}
@@ -90,17 +115,17 @@ export default function AuthPage() {
             </div>
           )}
 
-          <button type="submit" className={styles.submitBtn}>
-            {isLogin ? 'Log In' : 'Sign Up'}
+          <button type="submit" className={styles.submitBtn} disabled={loading}>
+            {loading ? 'Please wait…' : isLogin ? 'Log In' : 'Sign Up'}
           </button>
         </form>
 
         <p className={styles.toggleText}>
-          {isLogin ? "Don't have an account?" : "Already have an account?"}{' '}
+          {isLogin ? "Don't have an account?" : 'Already have an account?'}{' '}
           <button
             type="button"
             className={styles.toggleBtn}
-            onClick={() => setIsLogin(!isLogin)}
+            onClick={() => { setIsLogin(!isLogin); setError(''); }}
           >
             {isLogin ? 'Sign up here' : 'Log in here'}
           </button>
