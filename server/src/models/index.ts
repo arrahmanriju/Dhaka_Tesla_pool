@@ -14,11 +14,9 @@ export const sequelize = new Sequelize({
 
 initUser(sequelize);
 initVehicle(sequelize);
-
-// Define associations
-User.hasOne(Vehicle, { foreignKey: 'driver_id' });
-Vehicle.belongsTo(User, { foreignKey: 'driver_id' });
+// Setup Associations
+User.hasMany(Vehicle, { foreignKey: 'driverId' });
+Vehicle.belongsTo(User, { foreignKey: 'driverId' });
 
 export { User, Vehicle };
-
 

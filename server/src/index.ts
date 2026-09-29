@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import authRoutes from './routes/auth';
 import driverRoutes from './routes/driver';
+import vehicleRoutes from './routes/vehicle';
 import { sequelize } from './models';
 
 dotenv.config();
@@ -18,6 +19,9 @@ app.use('/auth', authRoutes);
 
 // Driver routes
 app.use('/driver', driverRoutes);
+
+// Vehicle routes
+app.use('/vehicle', vehicleRoutes);
 
 // Health check endpoint
 app.get('/health', (req: Request, res: Response) => {

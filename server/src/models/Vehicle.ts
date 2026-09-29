@@ -2,9 +2,11 @@ import { DataTypes, Model } from 'sequelize';
 
 export class Vehicle extends Model {
   declare id: string;
-  declare driver_id: string;
-  declare name: string;
-  declare capacity: number;
+  declare driverId: string;
+  declare modelName: string;
+  declare seatCapacity: number;
+  declare licensePlate: string;
+  declare isActive: boolean;
   declare readonly createdAt: Date;
   declare readonly updatedAt: Date;
 }
@@ -17,17 +19,33 @@ export const initVehicle = (sequelize: any) => {
         defaultValue: DataTypes.UUIDV4,
         primaryKey: true,
       },
-      driver_id: {
+      driverId: {
         type: DataTypes.UUID,
         allowNull: false,
-        unique: true, // 1-to-1 mapping for MVP
+        references: {
+          model: 'Users',
+          key: 'id',
+        },
       },
-      name: {
+      modelName: {
         type: DataTypes.STRING,
         allowNull: false,
       },
-      capacity: {
+      seatCapacity: {
         type: DataTypes.INTEGER,
+        allowNull: false,
+        validate: {
+          min: 1, // Validation: capacity must be positive integer
+        },
+      },
+      licensePlate: {
+        type: DataTypes.STRING,
+        allowNull: false,
+        unique: true,
+      },
+      isActive: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: true,
         allowNull: false,
       },
     },
