@@ -21,9 +21,9 @@ describe('Ride Request API and Logic', () => {
 
   describe('Seat capacity and Concurrency', () => {
     it('should never exceed vehicle seat capacity even concurrently', async () => {
-      const driver = (await User.create({ name: 'Driver', password: 'pwd', role: 'DRIVER' })).toJSON() as any;
-      const passenger1 = (await User.create({ name: 'P1', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
-      const passenger2 = (await User.create({ name: 'P2', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
+      const driver = (await User.create({ name: 'Driver', email: 'driver@test.com', password: 'pwd', role: 'DRIVER' })).toJSON() as any;
+      const passenger1 = (await User.create({ name: 'P1', email: 'p1@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
+      const passenger2 = (await User.create({ name: 'P2', email: 'p2@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
 
       const vehicle = (await Vehicle.create({
         driverId: driver.id,
@@ -59,8 +59,8 @@ describe('Ride Request API and Logic', () => {
 
   describe('State transitions', () => {
     it('rejects invalid state transitions', async () => {
-      const passenger = (await User.create({ name: 'P', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
-      const driver = (await User.create({ name: 'D', password: 'pwd', role: 'DRIVER' })).toJSON() as any;
+      const passenger = (await User.create({ name: 'P', email: 'p@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
+      const driver = (await User.create({ name: 'D', email: 'd@test.com', password: 'pwd', role: 'DRIVER' })).toJSON() as any;
       await Vehicle.create({ driverId: driver.id, modelName: 'Car', seatCapacity: 4, licensePlate: 'CAR-10' });
 
       const resReq = await request(app).post('/ride-requests').send({
@@ -83,7 +83,7 @@ describe('Ride Request API and Logic', () => {
       // Assuming Gulshan -> Banani distance is 2km.
       // Fare = 100 + (2km * 20 * 1 seat) - 30 = 110 BDT.
       
-      const p1 = (await User.create({ name: 'Nusrat', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
+      const p1 = (await User.create({ name: 'Nusrat', email: 'nusrat@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
       const res1 = await request(app).post('/ride-requests').send({
         passengerId: p1.id, pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1,
       });
@@ -91,7 +91,7 @@ describe('Ride Request API and Logic', () => {
 
       // Rafiq booking 4 seats for same route (no pool discount)
       // Fare = 100 + (2km * 20 * 4 seats) - 0 = 260 BDT.
-      const p2 = (await User.create({ name: 'Rafiq', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
+      const p2 = (await User.create({ name: 'Rafiq', email: 'rafiq@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
       const res2 = await request(app).post('/ride-requests').send({
         passengerId: p2.id, pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 4,
       });
@@ -101,8 +101,8 @@ describe('Ride Request API and Logic', () => {
 
   describe('Isolation', () => {
     it('prevents a passenger from viewing or modifying another passenger ride', async () => {
-      const p1 = (await User.create({ name: 'P1', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
-      const p2 = (await User.create({ name: 'P2', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
+      const p1 = (await User.create({ name: 'P1', email: 'p1@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
+      const p2 = (await User.create({ name: 'P2', email: 'p2@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
       
       const resReq = await request(app).post('/ride-requests').send({
         passengerId: p1.id, pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1,
@@ -121,7 +121,7 @@ describe('Ride Request API and Logic', () => {
 
   describe('Cancellation', () => {
     it('allows cancellation in REQUESTED state', async () => {
-      const p1 = (await User.create({ name: 'P1', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
+      const p1 = (await User.create({ name: 'P1', email: 'p1@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
       const resReq = await request(app).post('/ride-requests').send({
         passengerId: p1.id, pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1,
       });
@@ -134,8 +134,8 @@ describe('Ride Request API and Logic', () => {
     });
 
     it('denies passenger cancellation after driver arrived', async () => {
-      const p1 = (await User.create({ name: 'P1', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
-      const d1 = (await User.create({ name: 'D1', password: 'pwd', role: 'DRIVER' })).toJSON() as any;
+      const p1 = (await User.create({ name: 'P1', email: 'p1@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
+      const d1 = (await User.create({ name: 'D1', email: 'd1@test.com', password: 'pwd', role: 'DRIVER' })).toJSON() as any;
       await Vehicle.create({ driverId: d1.id, modelName: 'Car', seatCapacity: 4, licensePlate: 'CAR-C2' });
 
       const resReq = await request(app).post('/ride-requests').send({

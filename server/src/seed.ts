@@ -17,6 +17,7 @@ async function seed() {
     // 1. Create Driver Jashim
     const jashim = await User.create({
       name: 'Jashim',
+      email: 'jashim@test.com',
       password: defaultPassword,
       role: 'DRIVER',
     });
@@ -24,9 +25,10 @@ async function seed() {
 
     // 2. Create Vehicle "Bullet" for Jashim
     await Vehicle.create({
-      driver_id: jashim.id,
-      name: 'Bullet',
-      capacity: 3,
+      driverId: jashim.id,
+      modelName: 'Bullet',
+      seatCapacity: 3,
+      licensePlate: 'DHK-1234',
     });
     console.log('Created vehicle Bullet (3 seats) for Jashim');
 
@@ -35,6 +37,7 @@ async function seed() {
     for (const name of passengers) {
       await User.create({
         name,
+        email: `${name.toLowerCase()}@test.com`,
         password: defaultPassword,
         role: 'PASSENGER',
       });
