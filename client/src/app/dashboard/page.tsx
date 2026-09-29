@@ -1,8 +1,16 @@
+'use client';
+import { useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import { getUser } from '@/lib/auth';
+import { LoadingScreen } from '@/components/UI';
+
+// Legacy route — redirect to the role-appropriate dashboard
 export default function Dashboard() {
-  return (
-    <div style={{ padding: '2rem', fontFamily: 'sans-serif' }}>
-      <h1>Dashboard</h1>
-      <p>Authentication successful. You are logged in.</p>
-    </div>
-  );
+  const router = useRouter();
+  useEffect(() => {
+    const user = getUser();
+    if (!user) { router.replace('/auth'); return; }
+    router.replace(user.role === 'DRIVER' ? '/driver' : '/passenger');
+  }, [router]);
+  return <LoadingScreen label="Redirecting…" />;
 }
