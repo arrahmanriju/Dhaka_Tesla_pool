@@ -6,14 +6,10 @@
     "outDir": "./dist",
 
     // Environment Settings
-    // See also https://aka.ms/tsconfig/module
-    "module": "CommonJS",
-    "target": "esnext",
-    "types": [],
-    // For nodejs:
-    // "lib": ["esnext"],
-    // "types": ["node"],
-    // and npm install -D @types/node
+    "module": "commonjs",
+    "target": "es2020",
+    "types": ["node"],
+    "lib": ["es2020"],
 
     // Other Outputs
     "sourceMap": true,
@@ -24,21 +20,19 @@
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
 
-    // Style Options
-    // "noImplicitReturns": true,
-    // "noImplicitOverride": true,
-    // "noUnusedLocals": true,
-    // "noUnusedParameters": true,
-    // "noFallthroughCasesInSwitch": true,
-    // "noPropertyAccessFromIndexSignature": true,
-
     // Recommended Options
     "strict": true,
-    "jsx": "react-jsx",
     "isolatedModules": true,
-    "noUncheckedSideEffectImports": true,
-    "moduleDetection": "force",
     "skipLibCheck": true,
+    "useDefineForClassFields": false,
     "esModuleInterop": true,
-  }
+    "resolveJsonModule": true
+  },
+  // Exclude test files from the production build.
+  // Jest/ts-jest handles test compilation separately via jest.config.js.
+  "exclude": [
+    "node_modules",
+    "dist",
+    "src/tests"
+  ]
 }

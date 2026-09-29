@@ -36,13 +36,17 @@ app.get('/health', (req: Request, res: Response) => {
   res.status(200).json({ status: 'ok', service: 'dhaka-tesla-pool-backend' });
 });
 
-// Sync database and start server
-sequelize.sync().then(() => {
-  console.log('Database synced');
-  app.listen(port, () => {
-    console.log(`Server is running on port ${port}`);
-  });
-}).catch(err => {
-  console.error('Failed to sync database:', err);
-});
+// Export app for testing
+export { app };
 
+if (require.main === module) {
+  // Sync database and start server
+  sequelize.sync().then(() => {
+    console.log('Database synced');
+    app.listen(port, () => {
+      console.log(`Server is running on port ${port}`);
+    });
+  }).catch(err => {
+    console.error('Failed to sync database:', err);
+  });
+}
