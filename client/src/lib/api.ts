@@ -127,14 +127,23 @@ export const passengerApi = {
 // ─── Driver APIs ─────────────────────────────────────────────────────────────
 
 export const driverApi = {
+  // Backend: PUT /driver/:id/status  { isOnline: boolean }
   setOnlineStatus: (driverId: string, isOnline: boolean) =>
-    request<{ user: User }>('/driver/status', {
-      method: 'PATCH',
-      body: JSON.stringify({ driverId, isOnline }),
-    }),
+    request<{ isOnline: boolean; message: string }>(`/driver/${driverId}/status`, {
+      method: 'PUT',
+      body: JSON.stringify({ isOnline }),
+    // Normalise response: the driver page expects res.user.isOnline
+    }).then(r => ({ user: { isOnline: r.isOnline } as User })),
 
+  // Backend returns { requests }, we normalise to { rides }
   getPendingRides: (driverId: string) =>
-    request<{ rides: Ride[] }>(`/ride-requests/pending?driverId=${driverId}`),
+    request<{ requests: Ride[] }>(`/ride-requests/pending?driverId=${driverId}`)
+      .then(r => ({ rides: r.requests.map((req: any) => ({
+        ...req,
+        estimatedFareBDT: (req.estimatedFare / 100).toFixed(2),
+        createdAt: req.createdAt ?? new Date().toISOString(),
+        updatedAt: req.updatedAt ?? new Date().toISOString(),
+      }))})),
 
   acceptRide: (rideId: string, driverId: string) =>
     request<{ message: string; ride: Ride }>(`/ride-requests/${rideId}/accept`, {
@@ -142,11 +151,25 @@ export const driverApi = {
       body: JSON.stringify({ driverId }),
     }),
 
+  // Backend: GET /driver/rides/active?driverId=...
   getActiveRides: (driverId: string) =>
-    request<{ rides: Ride[] }>(`/driver/active?driverId=${driverId}`),
+    request<{ rides: Ride[] }>(`/driver/rides/active?driverId=${driverId}`)
+      .then(r => ({ rides: r.rides.map((ride: any) => ({
+        ...ride,
+        estimatedFareBDT: ride.estimatedFareBDT ?? (ride.estimatedFare / 100).toFixed(2),
+        createdAt: ride.createdAt ?? new Date().toISOString(),
+        updatedAt: ride.updatedAt ?? new Date().toISOString(),
+      }))})),
 
+  // Backend: GET /driver/rides/history?driverId=...
   getHistory: (driverId: string) =>
-    request<{ rides: Ride[] }>(`/driver/history?driverId=${driverId}`),
+    request<{ rides: Ride[] }>(`/driver/rides/history?driverId=${driverId}`)
+      .then(r => ({ rides: r.rides.map((ride: any) => ({
+        ...ride,
+        estimatedFareBDT: ride.estimatedFareBDT ?? (ride.estimatedFare / 100).toFixed(2),
+        createdAt: ride.createdAt ?? new Date().toISOString(),
+        updatedAt: ride.updatedAt ?? new Date().toISOString(),
+      }))})),
 
   arrive: (rideId: string, driverId: string) =>
     request<{ ride: Ride }>(`/driver/rides/${rideId}/arrive`, {
@@ -183,6 +206,13 @@ export const driverApi = {
       body: JSON.stringify({ driverId, modelName, licensePlate, seatCapacity }),
     }),
 
+  // Backend: GET /vehicle/driver/:driverId  (returns 404 if no vehicle, treat as null)
   getVehicle: (driverId: string) =>
-    request<{ vehicle: Vehicle | null }>(`/vehicle?driverId=${driverId}`),
+    request<{ vehicle: Vehicle }>(`/vehicle/driver/${driverId}`)
+      .then(r => ({ vehicle: r.vehicle }))
+      .catch(err => {
+        // 404 means no vehicle registered yet — that's a valid empty state
+        if (err instanceof ApiError && err.status === 404) return { vehicle: null };
+        throw err;
+      }),
 };

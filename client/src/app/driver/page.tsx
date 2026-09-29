@@ -109,7 +109,7 @@ function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline
       const res = await driverApi.getPendingRides(driverId);
       setRides(res.rides);
     } catch (err: any) {
-      setError(err.message);
+      setError(err.status ? `Error ${err.status}: ${err.message}` : err.message);
     } finally {
       setLoading(false);
     }
@@ -124,7 +124,7 @@ function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline
       setSuccessMsg('Ride accepted and added to your pool!');
       await load();
     } catch (err: any) {
-      setError(err.message);
+      setError(err.status ? `Error ${err.status}: ${err.message}` : err.message);
     } finally {
       setAccepting(null);
     }
@@ -210,7 +210,7 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
       const res = await driverApi.getActiveRides(driverId);
       setRides(res.rides);
     } catch (err: any) {
-      setError(err.message);
+      setError(err.status ? `Error ${err.status}: ${err.message}` : err.message);
     } finally {
       setLoading(false);
     }
@@ -228,13 +228,17 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
       setSuccessMsg(`Ride marked as ${action === 'arrive' ? 'driver arrived' : action}ed.`);
       await load();
     } catch (err: any) {
-      setError(err.message);
+      setError(err.status ? `Error ${err.status}: ${err.message}` : err.message);
     } finally {
       setActionLoading(null);
     }
   };
 
   if (loading) return <LoadingScreen label="Loading active rides…" />;
+
+  // Only show EmptyState if load succeeded (no error). If there's an error,
+  // the ErrorBanner above already tells the user what went wrong.
+  const showEmpty = !error && rides.length === 0;
 
   return (
     <div className="animate-in">
@@ -249,13 +253,13 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
       {error && <ErrorBanner message={error} />}
       {successMsg && <SuccessBanner message={successMsg} />}
 
-      {rides.length === 0 ? (
+      {showEmpty ? (
         <EmptyState
           icon="🚗"
           title="No active rides"
           description="Accept pending requests to build your pool."
         />
-      ) : (
+      ) : rides.length > 0 ? (
         <div className="ride-list">
           {rides.map((ride) => (
             <ActiveDriverRideCard
