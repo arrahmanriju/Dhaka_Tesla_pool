@@ -21,6 +21,7 @@ export class RideRequest extends Model {
   public seatCount!: number;
   public estimatedFare!: number; // Stored in integer paisa (100 paisa = 1 BDT)
   public status!: 'PENDING' | 'ACCEPTED' | 'COMPLETED' | 'CANCELLED';
+  public vehicleId!: string | null;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
 }
@@ -64,6 +65,14 @@ export const initRideRequest = (sequelize: any) => {
         type: DataTypes.ENUM('PENDING', 'ACCEPTED', 'COMPLETED', 'CANCELLED'),
         allowNull: false,
         defaultValue: 'PENDING',
+      },
+      vehicleId: {
+        type: DataTypes.UUID,
+        allowNull: true,
+        references: {
+          model: 'Vehicles',
+          key: 'id',
+        },
       },
     },
     {

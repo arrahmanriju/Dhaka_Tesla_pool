@@ -21,6 +21,7 @@ app.use('/auth', authRoutes);
 // Driver routes
 app.use('/driver', driverRoutes);
 
+
 // Vehicle routes
 app.use('/vehicle', vehicleRoutes);
 

@@ -7,6 +7,7 @@ export class Vehicle extends Model {
   declare seatCapacity: number;
   declare licensePlate: string;
   declare isActive: boolean;
+  declare occupiedSeats: number;
   declare readonly createdAt: Date;
   declare readonly updatedAt: Date;
 }
@@ -47,6 +48,14 @@ export const initVehicle = (sequelize: any) => {
         type: DataTypes.BOOLEAN,
         defaultValue: true,
         allowNull: false,
+      },
+      occupiedSeats: {
+        type: DataTypes.INTEGER,
+        defaultValue: 0,
+        allowNull: false,
+        validate: {
+          min: 0,
+        },
       },
     },
     {
