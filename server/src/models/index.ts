@@ -24,6 +24,10 @@ Vehicle.belongsTo(User, { foreignKey: 'driverId' });
 User.hasMany(RideRequest, { foreignKey: 'passengerId', as: 'rideRequests' });
 RideRequest.belongsTo(User, { foreignKey: 'passengerId', as: 'passenger' });
 
+// driverId on RideRequest — set when the ride is MATCHED
+User.hasMany(RideRequest, { foreignKey: 'driverId', as: 'assignedRides' });
+RideRequest.belongsTo(User, { foreignKey: 'driverId', as: 'driver' });
+
 Vehicle.hasMany(RideRequest, { foreignKey: 'vehicleId', as: 'poolRequests' });
 RideRequest.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
 export { User, Vehicle, RideRequest };

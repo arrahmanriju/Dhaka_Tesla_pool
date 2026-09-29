@@ -25,7 +25,7 @@ app.use('/driver', driverRoutes);
 // Vehicle routes
 app.use('/vehicle', vehicleRoutes);
 
-// Ride Request routes
+// Ride Request routes (passenger creates + views, driver accepts)
 app.use('/ride-requests', rideRequestRoutes);
 
 // Health check endpoint
