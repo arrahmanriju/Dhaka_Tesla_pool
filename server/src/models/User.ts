@@ -7,6 +7,7 @@ export class User extends Model {
   declare email: string;
   declare role: 'DRIVER' | 'PASSENGER';
   declare password: string;
+  declare isOnline: boolean;
   declare readonly createdAt: Date;
   declare readonly updatedAt: Date;
 }
@@ -38,6 +39,11 @@ export const initUser = (sequelize: any) => {
       password: {
         type: DataTypes.STRING,
         allowNull: false,
+      },
+      isOnline: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
       },
     },
     {

@@ -53,6 +53,7 @@ router.post('/signup', async (req: Request, res: Response) => {
       email: String(email).toLowerCase().trim(),
       password: hashedPassword,
       role,
+      isOnline: role === 'DRIVER' ? false : undefined,
     });
 
     // --- Issue token ---
@@ -64,7 +65,7 @@ router.post('/signup', async (req: Request, res: Response) => {
 
     return res.status(201).json({
       token,
-      user: { id: user.id, name: user.name, email: user.email, role: user.role },
+      user: { id: user.id, name: user.name, email: user.email, role: user.role, isOnline: user.isOnline },
     });
   } catch (error) {
     console.error('[signup] error:', error);
@@ -110,7 +111,7 @@ router.post('/login', async (req: Request, res: Response) => {
 
     return res.json({
       token,
-      user: { id: user.id, name: user.name, email: user.email, role: user.role },
+      user: { id: user.id, name: user.name, email: user.email, role: user.role, isOnline: user.isOnline },
     });
   } catch (error) {
     console.error('[login] error:', error);
