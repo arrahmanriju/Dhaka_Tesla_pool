@@ -32,7 +32,12 @@ export function authenticateToken(
   }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as AuthenticatedRequest['user'];
+    const decoded = jwt.verify(token, JWT_SECRET) as {
+      id: string;
+      role: 'DRIVER' | 'PASSENGER';
+      name: string;
+      email: string;
+    };
     req.user = decoded;
     next();
   } catch {
