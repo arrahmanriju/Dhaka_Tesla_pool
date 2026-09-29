@@ -2,6 +2,7 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import authRoutes from './routes/auth';
+import rideRequestRoutes from './routes/rideRequest';
 import { sequelize } from './models';
 
 dotenv.config();
@@ -14,6 +15,9 @@ app.use(express.json());
 
 // Auth routes
 app.use('/auth', authRoutes);
+
+// Ride Request routes
+app.use('/ride-requests', rideRequestRoutes);
 
 // Health check endpoint
 app.get('/health', (req: Request, res: Response) => {
