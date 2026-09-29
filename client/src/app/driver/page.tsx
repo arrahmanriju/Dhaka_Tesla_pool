@@ -270,7 +270,7 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
             />
           ))}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
