@@ -2,6 +2,7 @@ import { Sequelize } from 'sequelize';
 import path from 'path';
 import { User, initUser } from './User';
 import { Vehicle, initVehicle } from './Vehicle';
+import { RideRequest, initRideRequest } from './RideRequest';
 
 // Setup Sequelize for SQLite
 const storagePath = process.env.DB_STORAGE_PATH || path.join(__dirname, '../../data/database.sqlite');
@@ -14,10 +15,14 @@ export const sequelize = new Sequelize({
 
 initUser(sequelize);
 initVehicle(sequelize);
+initRideRequest(sequelize);
 
 // Setup Associations
 User.hasMany(Vehicle, { foreignKey: 'driverId' });
 Vehicle.belongsTo(User, { foreignKey: 'driverId' });
 
-export { User, Vehicle };
+User.hasMany(RideRequest, { foreignKey: 'passengerId', as: 'rideRequests' });
+RideRequest.belongsTo(User, { foreignKey: 'passengerId', as: 'passenger' });
+
+export { User, Vehicle, RideRequest };
 
