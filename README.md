@@ -139,9 +139,28 @@ Passengers may cancel their ride only while it is in one of these states:
 | `REQUESTED` | ✅ Yes | No driver has committed yet. Zero cost. |
 | `MATCHED` | ✅ Yes | Driver assigned but not yet physically en-route. Passenger can still back out. |
 | `DRIVER_ARRIVED` | ❌ No | Driver has made the physical trip to the pickup point. Cancelling here unfairly penalises the driver. |
-| `STARTED` | ❌ No | Trip is in progress. Cannot cancel. |
+| `STARTED` | ⚠️ Not a normal cancel | Trip is in progress. The ordinary cancel is refused, but the passenger can **leave part-way** at a zone they name: see *Leaving a ride mid-trip* below. It ends as `CANCELLED_IN_TRANSIT`. |
 | `COMPLETED` | ❌ No | Terminal state — cannot undo. |
 | `CANCELLED` | ❌ No | Already cancelled. |
+| `CANCELLED_IN_TRANSIT` | ❌ No | Already left the ride. |
+
+### Leaving a ride mid-trip (`CANCELLED_IN_TRANSIT`)
+A passenger whose ride is `STARTED` can get off part-way with `PATCH /passenger/rides/:id/cancel-in-transit` and `{ "cancellationZone": "Mirpur" }`. The ride ends as **`CANCELLED_IN_TRANSIT`**, a terminal status separate from `CANCELLED`: they were picked up and travelled part of the route, so it stays in their history and the driver's as a real part-trip with a fare, unlike a request that never happened.
+
+- **Cancellation zone (required)** — the nearest predefined zone where they are dropped off, from the same zone list as everywhere else. It cannot be the pickup zone, or the destination zone (at the destination the driver completes the trip). A missing or unknown zone is a 400 and nothing changes.
+- **Fare, pro-rated with the original formula** — the same distance table and per-km rate as the estimate, measured from `pickupZone` to `cancellationZone` instead of to the destination:
+
+  `fare = ৳100 + distanceKm(pickup → cancellationZone) × ৳20 × seats − poolDiscount`
+
+  `poolDiscount` is the amount quoted at match time, in taka, unchanged (`baseFare` and `poolDiscount` are not touched; `estimatedFare`, what they pay, becomes this charge). The result is never below ৳0 and never above the fare locked for the full trip.
+- **Worked example** — Nusrat and Rafiq both ride **Uttara → Motijheel** (18 km) in Bullet.
+  Solo fare: 100 + 18 × 20 = **৳460**. Pool of 2 pays 70%: 460 × 70% = 322 → nearest ৳5 = **৳320** each, so the pool discount is 460 − 320 = **৳140**. Both trips start (৳320 locked). Nusrat asks to be dropped at **Mirpur** (Uttara → Mirpur is 9 km):
+  distance charge = 9 × 20 = ৳180; fare = 100 + 180 − 140 = **৳140** (that is `grossFare` ৳280 minus the ৳140 discount). Rafiq stays `STARTED` at ৳320.
+  Alone (no discount) the same exit costs 100 + 180 = **৳280**. If Nusrat named **Mohakhali → Uttara**, the table gives 100 + 11 × 20 = ৳320 for the part travelled, which is capped at her locked ৳180.
+- **Nobody else is re-priced** — a stated assumption, also in the code: passengers still on the vehicle keep exactly what was locked for them, and a co-passenger who has not started yet is **not** re-priced to a smaller pool either. A co-passenger leaving mid-route never retroactively changes what anyone else owes. (They are re-priced only by the ordinary pool events: someone joining, or a pre-trip cancellation.)
+- **The seat is released at once**, in the same transaction, so `GET /ride-requests/pending` shows the free seat straight away and the request passes the same route filter as before, with no re-match. (The vehicle's position for that filter is taken from the riders still on board, see Rule B.)
+- **Audit trail** — a `RideEvents` row (permanent) records `CANCELLED_IN_TRANSIT`, the actor (the passenger), the time, `cancellationZone`, `chargedFare` and `lockedFare`. `GET /driver/rides/timeline` shows it beside the other passengers' unchanged events; each passenger's own `timeline`/history carries only their own. The other passengers never see who left, where, or what they paid.
+- **Who and when** — only the ride's owner (404 no such ride, 403 someone else's, 401 not logged in, a driver's login is refused). Only a `STARTED` ride: `COMPLETED`, an earlier status or an already-cancelled ride gets 409. The check and the update are one conditional step inside an immediate transaction, and the driver's *complete* is conditional the same way, so completing and leaving at the same moment cannot both succeed or release the seat twice.
 
 ## Ride Status Page (Passenger)
 
