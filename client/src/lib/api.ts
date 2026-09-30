@@ -235,6 +235,8 @@ export interface Ride {
   joinedMidTrip?: boolean;
   /** Which flow a history row came from: the app, or a street ride joined by QR code */
   source?: 'APP' | 'QR';
+  /** A street ride on the Active Ride page: "You are Passenger N" */
+  qrPassengerNumber?: number;
   /** Only on a QR row: what a street trip has that an app ride does not */
   qr?: {
     sessionId: string;

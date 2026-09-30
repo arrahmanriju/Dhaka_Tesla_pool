@@ -3,10 +3,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { EmptyState, ErrorBanner, ErrorState, LoadingScreen, Spinner } from '@/components/UI';
 import { passengerApi, qrApi, type QRSession, type QRVehiclePreview } from '@/lib/api';
 import { usePreferences, useFormatApiError } from '@/lib/preferences';
-import type { TranslationKey } from '@/lib/translations';
-
-/** How often an open street ride re-reads itself (plain polling, no websockets). */
-export const STREET_POLL_MS = 8000;
 
 /** A QR sticker holds just the vehicle code; a link with ?code=... is understood too. */
 export function extractVehicleCode(raw: string): string {
@@ -19,11 +15,20 @@ type DetectorCtor = new (opts: { formats: string[] }) => Detector;
 
 /**
  * Street rides for drivers with no smartphone. The driver does nothing at all: the passenger scans the
- * sticker (or types the code), joins, and taps "I've arrived" when they get off. Others in the car
- * appear only as "Passenger 1", "Passenger 2". Payment is always cash.
+ * sticker (or types the code) and joins here. The ride itself (route, fare, cash, the others as "Passenger N",
+ * and "I've arrived") is then shown on the Active Ride page with the same card as an app ride. Payment is always cash.
  */
-export function StreetRideTab({ initialCode = '', onFinished }: { initialCode?: string; onFinished?: () => void }) {
-  const { t, tz, tp } = usePreferences();
+export function StreetRideTab({
+  initialCode = '',
+  onJoined,
+  onViewActive,
+}: {
+  initialCode?: string;
+  /** Called once the passenger has joined: the ride itself is shown on the Active Ride page */
+  onJoined: () => void;
+  onViewActive: () => void;
+}) {
+  const { t } = usePreferences();
   const formatError = useFormatApiError();
 
   const [session, setSession] = useState<QRSession | null>(null);
@@ -48,13 +53,8 @@ export function StreetRideTab({ initialCode = '', onFinished }: { initialCode?: 
     return () => clearTimeout(first);
   }, [load]);
 
-  // While a ride is open it re-reads itself, so people joining or leaving (and an automatic close) show up
-  const open = session?.status === 'OPEN';
-  useEffect(() => {
-    if (!open) return;
-    const timer = setInterval(() => { if (!document.hidden) load(true); }, STREET_POLL_MS);
-    return () => clearInterval(timer);
-  }, [open, load]);
+  // This page only joins a ride. A ride the passenger is on is shown on the Active Ride page, like an app ride.
+  const onARide = session?.status === 'OPEN';
 
   if (loading) return <LoadingScreen label={t('loading.qr')} />;
 
@@ -71,21 +71,22 @@ export function StreetRideTab({ initialCode = '', onFinished }: { initialCode?: 
         <ErrorState message={loadError} onRetry={() => load()} />
       ) : (
         <>
-          {session && (
-            <SessionCard
-              session={session}
-              // "I've arrived": this page has nothing more to show. The trip is in the ride history now.
-              onArrived={() => { setSession(null); onFinished?.(); }}
-              tz={tz}
-              t={t}
-              tp={tp}
-              formatError={formatError}
-            />
+          {onARide ? (
+            // Already on a street ride: point to it instead of offering a second one
+            <div className="info-banner" id="street-already" role="status" style={{ flexWrap: 'wrap', gap: 12 }}>
+              🛺 {t('qr.alreadyRiding')}
+              <button type="button" id="street-view-active" className="btn btn--secondary btn--sm" onClick={onViewActive}>
+                {t('qr.viewActive')}
+              </button>
+            </div>
+          ) : (
+            <>
+              {/* No ride in progress (never joined, or the last one has ended and moved to History): the normal
+                  "scan or enter a vehicle code" state, ready for a new ride */}
+              <JoinForm initialCode={initialCode} onJoined={onJoined} />
+              <EmptyState icon="🛺" title={t('qr.emptyTitle')} description={t('qr.emptyDesc')} />
+            </>
           )}
-          {/* No ride in progress (never joined, or the last one has ended and moved to History): the normal
-              "scan or enter a vehicle code" state, ready for a new ride */}
-          {!open && <JoinForm initialCode={initialCode} onJoined={setSession} />}
-          {!open && <EmptyState icon="🛺" title={t('qr.emptyTitle')} description={t('qr.emptyDesc')} />}
         </>
       )}
     </div>
@@ -259,101 +260,5 @@ function JoinForm({ initialCode, onJoined }: { initialCode: string; onJoined: (s
         )}
       </div>
     </div>
-  );
-}
-
-// ─── The ride ──────────────────────────────────────────────────────────────
-type Translate = ReturnType<typeof usePreferences>['t'];
-
-function SessionCard({
-  session,
-  onArrived,
-  tz,
-  t,
-  tp,
-  formatError,
-}: {
-  session: QRSession;
-  onArrived: () => void;
-  tz: (zone: string) => string;
-  t: Translate;
-  tp: ReturnType<typeof usePreferences>['tp'];
-  formatError: (err: unknown) => string;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const { you } = session;
-  const riding = session.status === 'OPEN' && you.status === 'RIDING';
-
-  const arrived = async () => {
-    setBusy(true); setError('');
-    try {
-      await qrApi.arrived(session.id);
-      onArrived();
-    } catch (err) {
-      setError(formatError(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <article className="ride-card ride-status" id={`street-ride-${session.id}`} data-status={session.status}>
-      <div className="ride-card__route">
-        <span className="ride-card__zone">{tz(you.pickupZone)}</span>
-        <span className="ride-card__arrow">→</span>
-        <span className="ride-card__zone">{tz(you.destinationZone)}</span>
-        <span className={`badge badge--${you.status === 'RIDING' ? 'started' : 'completed'}`}>{t(`qr.status.${you.status}` as TranslationKey)}</span>
-      </div>
-      {session.vehicle.nickname && <p className="form-hint">🛺 {session.vehicle.nickname} · {session.vehicle.vehicleCode}</p>}
-
-      {/* Everyone in the car, as Passenger N only */}
-      <section className="ride-block" id="street-passengers" aria-label={t('qr.others')}>
-        <h3 className="ride-block__title">{t('qr.others')}</h3>
-        <div className="ride-block__line">{t('qr.youAre', { n: you.passengerNumber })}</div>
-        {session.passengers.map((p) => (
-          <div key={p.label} className="ride-block__line">
-            {p.label}{p.isYou ? ` (${t('qr.youAre', { n: you.passengerNumber }).toLowerCase()})` : ''}: {t(`qr.status.${p.status}` as TranslationKey)}
-          </div>
-        ))}
-      </section>
-
-      <div className="ride-card__meta" style={{ marginTop: 16 }}>
-        <span className="ride-card__meta-item">{tp('seatUnit', you.seatCount)}</span>
-        <span className="ride-card__meta-item" id="street-fare">
-          {you.fareFinal ? t('qr.fareFinal') : t('qr.fareEstimate')} <strong>৳{you.fare}</strong>
-        </span>
-      </div>
-
-      {you.fareBreakdown.segments.some((s) => s.distanceKm > 0) && (
-        <section className="ride-block" id="street-breakdown" aria-label={t('rs.bill.title')}>
-          <h3 className="ride-block__title">{t('rs.bill.title')}</h3>
-          <div className="ride-block__line">{t('rs.bill.base')}: ৳{you.fareBreakdown.baseCharge}</div>
-          {you.fareBreakdown.segments.filter((s) => s.distanceKm > 0).map((s, i) => (
-            <div key={i} className="ride-block__line">
-              {t('rs.bill.segment', { km: s.distanceKm, n: s.passengers, distance: s.distanceCharge, rate: s.ratePercent })} = ৳{s.charge}
-            </div>
-          ))}
-          {(you.poolDiscount ?? 0) > 0 && <div className="ride-block__line">{t('rs.bill.saved', { saved: you.poolDiscount ?? 0 })}</div>}
-        </section>
-      )}
-
-      {/* Cash to the driver: the wallet is never used for street rides */}
-      {you.payment.status === 'CASH_DUE' && (
-        <div className="ride-block__line" id="street-payment" style={{ marginTop: 8 }}>
-          💵 {t('qr.payCash', { amount: you.payment.amount ?? you.fare ?? 0 })}
-        </div>
-      )}
-
-      {error && <ErrorBanner message={error} />}
-      {riding && (
-        <div className="ride-card__footer" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
-          <p className="form-hint">{t('qr.arrivedHelp')}</p>
-          <button id="street-arrived" className="btn btn--success" onClick={arrived} disabled={busy}>
-            {busy ? <><Spinner /> {t('qr.arriving')}</> : `✅ ${t('qr.arrived')}`}
-          </button>
-        </div>
-      )}
-    </article>
   );
 }
