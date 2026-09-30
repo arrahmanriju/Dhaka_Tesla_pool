@@ -1,0 +1,38 @@
+# Fly.io config for the API. Deploy from the server/ folder:  fly deploy --ha=false
+# (--ha=false = one machine: SQLite is a single file on one volume, so the API must not be scaled out.)
+# The app name must be globally unique on Fly: change it here (or let `fly launch --copy-config` rename it).
+app = "dhaka-tesla-pool-api"
+primary_region = "sin"   # Singapore. "bom" (Mumbai) is another close choice.
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  PORT = "3001"
+  DB_STORAGE_PATH = "/app/data/database.sqlite"
+  # Secrets are NOT written here. Set them with:  fly secrets set JWT_SECRET=... CORS_ORIGIN=...
+
+[http_service]
+  internal_port = 3001
+  force_https = true
+  auto_stop_machines = "off"     # keep it running: no cold start for the first visitor
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = "20s"
+    interval = "30s"
+    method = "GET"
+    path = "/health"
+    timeout = "5s"
+
+# The database and uploaded photos live on this volume, so they survive deploys.
+# Create it once, before the first deploy:  fly volumes create data --size 1 --region sin
+[[mounts]]
+  source = "data"
+  destination = "/app/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

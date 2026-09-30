@@ -19,7 +19,11 @@ dotenv.config();
 const app = express();
 const port = process.env.PORT || 3001;
 
-app.use(cors());
+// CORS: in production set CORS_ORIGIN to the address(es) of the website that calls this API (comma separated,
+// e.g. https://your-app.vercel.app). Only those origins may call it from a browser. Left unset (local
+// development) every origin is allowed.
+const allowedOrigins = (process.env.CORS_ORIGIN ?? '').split(',').map((o) => o.trim().replace(/\/$/, '')).filter(Boolean);
+app.use(cors(allowedOrigins.length > 0 ? { origin: allowedOrigins } : undefined));
 // The onboarding form uploads a profile picture (max 2 MB) as a base64 data URL, which is
 // larger than the default 100 kB JSON limit. Must be registered before the global parser.
 app.use('/driver/onboarding', express.json({ limit: '3mb' }));
@@ -84,6 +88,10 @@ if (require.main === module) {
   } catch (error) {
     console.error(`\n${(error as Error).message}\n`);
     process.exit(1);
+  }
+
+  if (process.env.NODE_ENV === 'production' && allowedOrigins.length === 0) {
+    console.warn('[cors] CORS_ORIGIN is not set: every website may call this API from a browser. Set it to your frontend address.');
   }
 
   // Sync database and start server
