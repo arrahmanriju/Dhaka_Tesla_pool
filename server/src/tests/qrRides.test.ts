@@ -588,10 +588,15 @@ describe('QR street rides', () => {
       expect(await QRRideSession.findByPk(id)).toMatchObject({ status: 'CLOSED', closeReason: 'TIMEOUT' });
       expect(await QRRideParticipant.findOne({ where: { sessionId: id } })).toMatchObject({ status: 'AUTO_COMPLETED', finalFare: 420, paymentStatus: 'CASH_DUE' });
       expect(await occupied()).toBe(1); // only Rafiq now
-      // Nusrat, checking her ride, sees it ended (and what she owes)
+      // Nusrat's Street Ride page has nothing left to show (it goes back to "enter a code"); what she owes is in her
+      // ride history, and the closed session can still be read by id
       const mine = await request(app).get('/qr/sessions/mine').set(asUser(nusrat.id));
-      expect(mine.body.session).toMatchObject({ status: 'CLOSED', closeReason: 'TIMEOUT' });
-      expect(mine.body.session.you).toMatchObject({ status: 'AUTO_COMPLETED', fare: 420, fareFinal: true });
+      expect(mine.body.session).toBeNull();
+      const history = await request(app).get('/passenger/rides/history').set(asUser(nusrat.id));
+      expect(history.body.rides[0]).toMatchObject({ source: 'QR', estimatedFare: 420, paymentStatus: 'CASH_DUE', qr: { autoCompleted: true, sessionCloseReason: 'TIMEOUT' } });
+      const closed = await view(nusrat, id);
+      expect(closed.body.session).toMatchObject({ status: 'CLOSED', closeReason: 'TIMEOUT' });
+      expect(closed.body.session.you).toMatchObject({ status: 'AUTO_COMPLETED', fare: 420, fareFinal: true });
     });
 
     it('a passenger who tries to arrive after the timeout is told the ride has ended', async () => {
