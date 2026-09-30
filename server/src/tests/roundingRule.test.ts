@@ -16,10 +16,11 @@
  *   Revenue                                       40 + 107 × 3 = 361               (360 if it were not rounded;
  *                                                 the extra ৳1 is the driver's rounding remainder)
  *
- * Segment trip costs of 40 and 260 are given directly here, because the zone table cannot produce a
- * first leg of ৳40 (every trip costs at least the ৳100 base). The second half of this file runs the real
- * zones, Gulshan → Mohakhali → Dhanmondi, through the API: Mohakhali → Dhanmondi (8 km) really does cost
- * 100 + 8 × 20 = ৳260, so persons 2 and 3 pay exactly 150 and 107 there too.
+ * Segment trip costs of 40 and 260 are given directly here, to test the SPLIT FORMULA IN ISOLATION: the zone
+ * table cannot produce a first leg of ৳40 (every trip costs at least the ৳100 base). The second half of this
+ * file runs the real zones through the API and checks the real numbers they produce: Gulshan → Mohakhali →
+ * Dhanmondi (3 + 7 km, tripCost ৳300 direct or through Mohakhali), and a real uneven split (3 riders sharing
+ * Gulshan → Mohakhali, tripCost ৳160: 160 / 3 = 53.33 → 54).
  */
 import request from 'supertest';
 import { app } from '../index';
@@ -157,16 +158,16 @@ describe('Gulshan → Mohakhali → Dhanmondi on the real zones (Jashim’s Bull
     await User.destroy({ where: {} });
   });
 
-  it('two join at Mohakhali for the 8 km leg (tripCost 100 + 160 = ৳260): each pays 260 / 2 + 20 = ৳150', async () => {
+  it('two join at Mohakhali for the 7 km leg (tripCost 100 + 140 = ৳240): each pays 240 / 2 + 20 = ৳140', async () => {
     const p1 = await join(nusrat, { pickupZone: 'Gulshan', destinationZone: 'Dhanmondi' });
     await start(p1);
     const p2 = await join(rafiq, { pickupZone: 'Mohakhali', destinationZone: 'Dhanmondi' });
     await start(p2);
-    // Rafiq's estimate while two are on board, for the whole 8 km: exactly 150
-    expect(await fareOf(p2)).toBe(150);
+    // Rafiq's estimate while two are on board, for the whole 7 km: exactly 140
+    expect(await fareOf(p2)).toBe(140);
   });
 
-  it('a third joins the same leg: each of the three pays ceil(260 / 3) + 20 = ৳107 on it, and the total reconciles', async () => {
+  it('a third joins at Mohakhali too: the two joiners pay 240 / 3 + 20 = ৳100 each (an even split), Person 1 pays ৳180', async () => {
     const p1 = await join(nusrat, { pickupZone: 'Gulshan', destinationZone: 'Dhanmondi' });
     await start(p1);
     const p2 = await join(rafiq, { pickupZone: 'Mohakhali', destinationZone: 'Dhanmondi' });
@@ -175,13 +176,25 @@ describe('Gulshan → Mohakhali → Dhanmondi on the real zones (Jashim’s Bull
     await start(p3);
     for (const id of [p1, p2, p3]) expect((await driverAction(id, 'complete')).status).toBe(200);
 
-    // Persons 2 and 3 travelled only the 8 km leg, with 3 on board: 260 / 3 = 86.67 → 87, + 20 = 107 each
-    expect(await fareOf(p2)).toBe(107);
-    expect(await fareOf(p3)).toBe(107);
-    // Person 1: 3 km alone (3/11 × 320 = 87.27 → 87), then the 8 km leg with 3 on board (8/11 × 320 = 232.73, / 3 = 77.58 → 78, + 20 = 98)
-    expect(await fareOf(p1)).toBe(87 + 98);
+    // Persons 2 and 3 travelled only the 7 km leg, with 3 on board: 240 / 3 = 80, + 20 = 100 each
+    expect(await fareOf(p2)).toBe(100);
+    expect(await fareOf(p3)).toBe(100);
+    // Person 1: 3 km alone (3/10 × 300 = 90), then the 7 km leg with 3 on board (7/10 × 300 = 210, / 3 = 70, + 20 = 90)
+    expect(await fareOf(p1)).toBe(90 + 90);
     const total = (await fareOf(p1)) + (await fareOf(p2)) + (await fareOf(p3));
-    expect(total).toBe(185 + 107 + 107);
+    expect(total).toBe(180 + 100 + 100);
+    expect(Number.isInteger(total)).toBe(true);
+  });
+
+  it('a real uneven split: three riders share Gulshan → Mohakhali (tripCost 160): 160 / 3 = 53.33 → 54, + 20 = ৳74 each', async () => {
+    const trip = { pickupZone: 'Gulshan', destinationZone: 'Mohakhali' };
+    const ids = [await join(nusrat, trip), await join(rafiq, trip), await join(shirin, trip)];
+    for (const id of ids) await start(id);
+    for (const id of ids) expect((await driverAction(id, 'complete')).status).toBe(200);
+    const fares = await Promise.all(ids.map(fareOf));
+    expect(fares).toEqual([74, 74, 74]); // everybody pays the same rounded-up amount
+    const total = fares.reduce((a, b) => a + b, 0);
+    expect(total).toBe(222); // 160 + 3 × 20 = 220, and the driver keeps the ৳2 rounding remainder
     expect(Number.isInteger(total)).toBe(true);
   });
 });

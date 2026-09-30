@@ -50,7 +50,7 @@ export const ROAD_CORRIDORS: ReadonlyArray<readonly string[]> = [
 ];
 
 /** The distances the fare code uses: DIRECT_KM made symmetric and closed under the triangle inequality. */
-function buildZoneKm(direct: Record<string, Record<string, number>>): Record<string, Record<string, number>> {
+export function buildZoneKm(direct: Record<string, Record<string, number>>): Record<string, Record<string, number>> {
   const zones = Object.keys(direct);
   const km: Record<string, Record<string, number>> = {};
   for (const a of zones) {

@@ -14,9 +14,10 @@
  * to the whole. Rounding: a shared split that does not divide evenly is rounded UP to the next whole
  * taka for every passenger on the segment (see fareCalculator.ts and roundingRule.test.ts).
  *
- * The pool changes at CHECKPOINTS, and the zone table is not additive: Gulshan → Mohakhali is 3 km and
- * Mohakhali → Dhanmondi is 8 km, 11 km in total against 10 km direct. So once a checkpoint at Mohakhali
- * exists, a rider going the whole way is priced over 11 km (tripCost 100 + 11 × 20 = ৳320), not 10.
+ * The pool changes at CHECKPOINTS. Mohakhali lies on the Gulshan → Dhanmondi road and the zone distances
+ * add up along it (Gulshan → Mohakhali 3 km + Mohakhali → Dhanmondi 7 km = 10 km, see zoneDistances.test.ts), so
+ * a checkpoint there does not change the journey's length or its trip cost (৳300). What does change is that
+ * each stretch shared by two or more carries its own ৳20 bonus.
  */
 import { pooledFare, segmentFare } from '../utils/fareCalculator';
 
@@ -64,8 +65,8 @@ describe('Gulshan → Dhanmondi, tripCost ৳300', () => {
   });
 
   describe('a fourth passenger for only PART of the route', () => {
-    // Three riders, Gulshan → Dhanmondi. Checkpoints are at Mohakhali (3 km from Gulshan, 8 km from Dhanmondi).
-    // Their journey is 3 + 8 = 11 km, so tripCost = 100 + 11 × 20 = ৳320; a segment gets segKm / 11 of it.
+    // Three riders, Gulshan → Dhanmondi. Checkpoints are at Mohakhali (3 km from Gulshan, 7 km from Dhanmondi).
+    // Their journey is 3 + 7 = 10 km, the same as direct, so tripCost = ৳300; a segment gets segKm / 10 of it.
 
     it('joins at Mohakhali (after Gulshan) and rides on to Dhanmondi', () => {
       // Gulshan → Mohakhali: 3 riders.  Mohakhali → Dhanmondi: 4 riders.
@@ -74,25 +75,25 @@ describe('Gulshan → Dhanmondi, tripCost ৳300', () => {
         exitZone: 'Dhanmondi',
         seatCount: 1,
       });
-      // 3 km: 3/11 × 320 = 87.27, / 3 = 29.09 → rounded UP to 30, + 20 = 50
-      // 8 km: 8/11 × 320 = 232.73, / 4 = 58.18 → rounded UP to 59, + 20 = 79      fare 50 + 79 = ৳129
-      expect(through.soloFare).toBe(320);
+      // 3 km: 3/10 × 300 = 90, / 3 = 30, + 20 = 50
+      // 7 km: 7/10 × 300 = 210, / 4 = 52.5 → rounded UP to 53, + 20 = 73      fare 50 + 73 = ৳123
+      expect(through.soloFare).toBe(300);
       expect(through.segments.map((s) => [s.distanceKm, s.passengers, s.driverBonus, s.charge])).toEqual([
         [3, 3, 20, 50],
-        [8, 4, 20, 79],
+        [7, 4, 20, 73],
       ]);
-      expect(through.fare).toBe(129);
+      expect(through.fare).toBe(123);
 
-      // The fourth passenger boards at Mohakhali: one 8 km segment with 4 on board. journeyKm 8, tripCost 100 + 160 = ৳260.
+      // The fourth passenger boards at Mohakhali: one 7 km segment with 4 on board. journeyKm 7, tripCost 100 + 140 = ৳240.
       const partial = segmentFare({ points: [{ zone: 'Mohakhali', passengerCount: 4 }], exitZone: 'Dhanmondi', seatCount: 1 });
-      expect(partial.soloFare).toBe(260);
-      expect(partial.fare).toBe(85); // 260 / 4 + 20 = 65 + 20
+      expect(partial.soloFare).toBe(240);
+      expect(partial.fare).toBe(80); // 240 / 4 + 20 = 60 + 20
 
       // Different from each other, and from the full-route numbers above
       expect(partial.fare).toBeLessThan(through.fare);
       expect(partial.fare).not.toBe(wholeRoute(3).fare); // 120
       expect(through.fare).not.toBe(wholeRoute(3).fare);
-      expect(through.fare * 3 + partial.fare).toBe(472); // the driver earns 3 × 129 + 85
+      expect(through.fare * 3 + partial.fare).toBe(449); // the driver earns 3 × 123 + 80
     });
 
     it('rides from Gulshan but leaves at Mohakhali, before Dhanmondi', () => {
@@ -102,13 +103,13 @@ describe('Gulshan → Dhanmondi, tripCost ৳300', () => {
         exitZone: 'Dhanmondi',
         seatCount: 1,
       });
-      // 3 km: 3/11 × 320 = 87.27, / 4 = 21.82 → rounded UP to 22, + 20 = 42
-      // 8 km: 8/11 × 320 = 232.73, / 3 = 77.58 → rounded UP to 78, + 20 = 98      fare 42 + 98 = ৳140
+      // 3 km: 3/10 × 300 = 90, / 4 = 22.5 → rounded UP to 23, + 20 = 43
+      // 7 km: 7/10 × 300 = 210, / 3 = 70, + 20 = 90      fare 43 + 90 = ৳133
       expect(stay.segments.map((s) => [s.distanceKm, s.passengers, s.charge])).toEqual([
-        [3, 4, 42],
-        [8, 3, 98],
+        [3, 4, 43],
+        [7, 3, 90],
       ]);
-      expect(stay.fare).toBe(140);
+      expect(stay.fare).toBe(133);
 
       // The one who leaves: a single 3 km segment with 4 on board. journeyKm 3, tripCost 100 + 60 = ৳160.
       const leaver = segmentFare({ points: [{ zone: 'Gulshan', passengerCount: 4 }], exitZone: 'Mohakhali', seatCount: 1 });
@@ -116,7 +117,7 @@ describe('Gulshan → Dhanmondi, tripCost ৳300', () => {
       expect(leaver.fare).toBe(60); // 160 / 4 + 20 = 40 + 20
 
       expect(leaver.fare).toBeLessThan(stay.fare);
-      expect(stay.fare * 3 + leaver.fare).toBe(480); // 3 × 140 + 60
+      expect(stay.fare * 3 + leaver.fare).toBe(459); // 3 × 133 + 60
     });
 
     it('every rider on a segment pays that segment once: each passenger’s charges add up to their fare', () => {
