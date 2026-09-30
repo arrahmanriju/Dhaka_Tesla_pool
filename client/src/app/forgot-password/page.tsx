@@ -3,7 +3,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { authApi, ApiError } from '@/lib/api';
 import { normalizePhone, toAsciiDigits } from '@/lib/phone';
-import { usePreferences } from '@/lib/preferences';
+import { usePreferences, useFormatApiError } from '@/lib/preferences';
 import { Spinner, ErrorBanner, SuccessBanner } from '@/components/UI';
 import { PreferenceControls } from '@/components/PreferenceControls';
 import type { TranslationKey } from '@/lib/translations';
@@ -15,6 +15,7 @@ const isStrongPassword = (p: string) => p.length >= 8 && /[A-Za-z]/.test(p) && /
 
 export default function ForgotPasswordPage() {
   const { t } = usePreferences();
+  const formatError = useFormatApiError();
   const [step, setStep] = useState<Step>('phone');
   const [phone, setPhone] = useState('');
   const [code, setCode] = useState('');
@@ -38,7 +39,7 @@ export default function ForgotPasswordPage() {
       setCode('');
       setStep('reset');
     } catch (err) {
-      setError(err instanceof Error ? { raw: err.message } : { key: 'auth.failed' });
+      setError({ raw: formatError(err) });
     } finally {
       setLoading(false);
     }
@@ -60,7 +61,7 @@ export default function ForgotPasswordPage() {
       if (err instanceof ApiError && err.status === 400 && err.message === 'Invalid or expired code.') {
         setError({ key: 'fp.invalidCode' });
       } else {
-        setError(err instanceof Error ? { raw: err.message } : { key: 'auth.failed' });
+        setError({ raw: formatError(err) });
       }
     } finally {
       setLoading(false);

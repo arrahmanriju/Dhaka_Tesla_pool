@@ -1,65 +1,22 @@
 import { Router, Request, Response } from 'express';
-import { Op } from 'sequelize';
-import { User, RideRequest, Vehicle } from '../models';
+import { Op, Transaction } from 'sequelize';
+import { sequelize, User, RideRequest, Vehicle, RideDecline } from '../models';
 import {
+  ACTIVE_RIDE_STATUSES,
   DHAKA_ZONES,
+  MAX_SEATS_PER_RIDE,
+  MIN_SEATS_PER_RIDE,
   POOL_JOINABLE_STATUSES,
-  areZonesCompatible,
+  TERMINAL_STATUSES,
 } from '../models/RideRequest';
-import {
-  calculateFareForPassenger,
-  calculateEstimatedFare,
-  POOL_DISCOUNT_BDT,
-} from '../utils/fareCalculator';
+import { calculateBaseFare, estimateFare, shareRatePercent } from '../utils/fareCalculator';
+import { isFareFinal, recalculatePoolFares } from '../utils/poolFares';
+import { checkPoolJoin, loadPool, PoolVerdict } from '../utils/pooling';
+import { recordRideEvent } from '../utils/rideEvents';
+import { DEFAULT_PAYMENT_METHOD, PAYMENT_METHODS, PaymentMethod, isPaymentMethod } from '../utils/payments';
+import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 
 const router = Router();
-
-// ---------------------------------------------------------------------------
-// HELPER: recalculatePoolFares
-//
-// Call this inside a transaction whenever the number of active passengers in
-// a pool changes (second passenger joins, or a passenger cancels).
-//
-// poolSize = the NEW number of distinct passengers still in the pool.
-//
-// POOL DISCOUNT RULE:
-//   poolSize >= 2  → discount = POOL_DISCOUNT_BDT × 100 paisa per passenger
-//   poolSize == 1  → discount = 0 (back to full fare)
-//
-// We update every ACTIVE (non-terminal) ride in the pool so they all see
-// the same discount decision.
-// ---------------------------------------------------------------------------
-async function recalculatePoolFares(
-  vehicleId: string,
-  sequelizeInstance: any,
-  transaction: any
-): Promise<void> {
-  // All non-cancelled, non-completed rides on this vehicle
-  const activeRides: any[] = await RideRequest.findAll({
-    where: {
-      vehicleId,
-      status: { [Op.notIn]: ['CANCELLED', 'COMPLETED'] },
-    },
-    transaction,
-  });
-
-  const poolSize = activeRides.length;
-
-  for (const ride of activeRides) {
-    const newFare = calculateFareForPassenger(
-      ride.pickupZone,
-      ride.destinationZone,
-      ride.seatCount,
-      poolSize
-    );
-    const newDiscount = poolSize >= 2 ? POOL_DISCOUNT_BDT * 100 : 0;
-
-    await RideRequest.update(
-      { estimatedFare: newFare, poolDiscount: newDiscount },
-      { where: { id: ride.id }, transaction }
-    );
-  }
-}
 
 // ---------------------------------------------------------------------------
 // HELPER: format a RideRequest for the API response
@@ -73,11 +30,20 @@ function formatRide(r: any) {
     pickupZone: r.pickupZone,
     destinationZone: r.destinationZone,
     seatCount: r.seatCount,
+    allowSharing: r.allowSharing,
+    // Money is whole taka. baseFare = the fare riding alone; estimatedFare = what this passenger
+    // pays right now; poolDiscount = what they save by sharing (baseFare − estimatedFare).
     baseFare: r.baseFare,
     estimatedFare: r.estimatedFare,
-    estimatedFareBDT: (r.estimatedFare / 100).toFixed(2),
     poolDiscount: r.poolDiscount,
-    poolDiscountBDT: (r.poolDiscount / 100).toFixed(2),
+    // true once the passenger's own journey has ended (COMPLETED or CANCELLED_IN_TRANSIT): only then is
+    // estimatedFare the final amount. Until then it is an estimate that follows the pool.
+    fareFinal: isFareFinal(r.status),
+    // Payment: how this ride is paid, and (once the journey has ended) what was owed or charged.
+    // Never a wallet balance: that is only ever returned to the passenger themselves.
+    paymentMethod: r.paymentMethod,
+    paymentStatus: r.paymentStatus,
+    paymentAmount: r.paymentAmount ?? null,
     status: r.status,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
@@ -85,57 +51,182 @@ function formatRide(r: any) {
 }
 
 // ---------------------------------------------------------------------------
-// POST /ride-requests
-// Passenger creates a ride request.
+// HELPER: validateRideInput
 //
-// Fare is calculated with poolSize=1 (solo). It will be recalculated
-// downward when a second passenger joins the same pool.
+// The single set of rules for a ride request, shared by the fare estimate and
+// the create endpoint so the two can never disagree. Values are checked strictly
+// (no coercion): seatCount must be an integer, allowSharing a boolean.
+// Returns per-field messages (keyed by form field) or the cleaned values.
 // ---------------------------------------------------------------------------
-router.post('/', async (req: Request, res: Response) => {
+type RideInput = {
+  pickupZone: string;
+  destinationZone: string;
+  seatCount: number;
+  allowSharing: boolean;
+  paymentMethod: PaymentMethod;
+};
+
+function validateRideInput(raw: {
+  pickupZone?: unknown;
+  destinationZone?: unknown;
+  seatCount?: unknown;
+  allowSharing?: unknown;
+  paymentMethod?: unknown;
+}): { fields: Record<string, string> } | { input: RideInput } {
+  const fields: Record<string, string> = {};
+  const isZone = (z: unknown): z is string =>
+    typeof z === 'string' && (DHAKA_ZONES as readonly string[]).includes(z);
+
+  if (!isZone(raw.pickupZone)) fields.pickupZone = 'Choose a valid pickup zone.';
+  if (!isZone(raw.destinationZone)) fields.destinationZone = 'Choose a valid destination zone.';
+  if (!fields.pickupZone && !fields.destinationZone && raw.pickupZone === raw.destinationZone) {
+    fields.destinationZone = 'Pickup and destination zones cannot be the same.';
+  }
+
+  if (
+    typeof raw.seatCount !== 'number' ||
+    !Number.isInteger(raw.seatCount) ||
+    raw.seatCount < MIN_SEATS_PER_RIDE ||
+    raw.seatCount > MAX_SEATS_PER_RIDE
+  ) {
+    fields.seatCount = `Seats must be a whole number from ${MIN_SEATS_PER_RIDE} to ${MAX_SEATS_PER_RIDE}.`;
+  }
+
+  // Sharing defaults to ON when omitted; anything else must be a real boolean.
+  if (raw.allowSharing !== undefined && typeof raw.allowSharing !== 'boolean') {
+    fields.allowSharing = 'allowSharing must be true or false.';
+  }
+
+  // Payment defaults to cash when omitted; anything else must be one of the two methods.
+  if (raw.paymentMethod !== undefined && !isPaymentMethod(raw.paymentMethod)) {
+    fields.paymentMethod = `Choose a payment method: ${PAYMENT_METHODS.join(' or ')}.`;
+  }
+
+  if (Object.keys(fields).length > 0) return { fields };
+  return {
+    input: {
+      pickupZone: raw.pickupZone as string,
+      destinationZone: raw.destinationZone as string,
+      seatCount: raw.seatCount as number,
+      allowSharing: raw.allowSharing === undefined ? true : (raw.allowSharing as boolean),
+      paymentMethod: raw.paymentMethod === undefined ? DEFAULT_PAYMENT_METHOD : (raw.paymentMethod as PaymentMethod),
+    },
+  };
+}
+
+/** Resolves the logged-in passenger from the token; writes the error response and returns null if not one. */
+async function requirePassenger(req: AuthenticatedRequest, res: Response) {
+  const passenger = req.user ? await User.findByPk(req.user.id) : null;
+  if (!passenger) {
+    res.status(401).json({ error: 'Passenger not found. Please log in again.' });
+    return null;
+  }
+  if (passenger.role !== 'PASSENGER') {
+    res.status(403).json({ error: 'Only passengers can request rides.' });
+    return null;
+  }
+  return passenger;
+}
+
+// ---------------------------------------------------------------------------
+// GET /ride-requests/zones
+// The zone list for the request form. Served from here so the dropdown can
+// never offer a zone the server would reject.
+// ---------------------------------------------------------------------------
+router.get('/zones', authenticateToken, (_req: Request, res: Response) => {
+  res.json({ zones: DHAKA_ZONES, minSeats: MIN_SEATS_PER_RIDE, maxSeats: MAX_SEATS_PER_RIDE });
+});
+
+// ---------------------------------------------------------------------------
+// GET /ride-requests/estimate?pickupZone=&destinationZone=&seatCount=&allowSharing=
+// Fare preview shown while the passenger fills in the form. Nothing is saved.
+// ---------------------------------------------------------------------------
+router.get('/estimate', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+  const { pickupZone, destinationZone, seatCount, allowSharing } = req.query;
+  const result = validateRideInput({
+    pickupZone,
+    destinationZone,
+    // Query values are strings; convert them here so the validator can stay strict.
+    seatCount: typeof seatCount === 'string' && seatCount.trim() !== '' ? Number(seatCount) : undefined,
+    allowSharing: allowSharing === 'true' ? true : allowSharing === 'false' ? false : allowSharing,
+  });
+  if ('fields' in result) {
+    return res.status(400).json({ error: Object.values(result.fields)[0], code: 'VALIDATION', fields: result.fields });
+  }
+
+  // Whole taka. `fare` is the price riding alone; `tiers` is the (lower) price as 2 or 3
+  // passengers share. A private ride has no tiers.
+  res.json(
+    estimateFare(
+      result.input.pickupZone,
+      result.input.destinationZone,
+      result.input.seatCount,
+      result.input.allowSharing
+    )
+  );
+});
+
+// ---------------------------------------------------------------------------
+// POST /ride-requests
+// Passenger creates a ride request (status REQUESTED).
+//
+// The passenger is identified by the login token, never by the request body, so
+// nobody can book a ride in someone else's name. Name and phone stay on the account.
+//
+// Rules: valid zones, different zones, 1–3 seats, one active ride per passenger.
+// Fare starts as the passenger's own base fare (riding alone); it drops when others join.
+// ---------------------------------------------------------------------------
+router.post('/', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { passengerId, pickupZone, destinationZone, seatCount } = req.body;
+    const passenger = await requirePassenger(req, res);
+    if (!passenger) return;
 
-    if (!passengerId || !pickupZone || !destinationZone || !seatCount) {
-      return res.status(400).json({
-        error: 'passengerId, pickupZone, destinationZone, and seatCount are required.',
+    const result = validateRideInput(req.body ?? {});
+    if ('fields' in result) {
+      return res.status(400).json({ error: Object.values(result.fields)[0], code: 'VALIDATION', fields: result.fields });
+    }
+    const { pickupZone, destinationZone, seatCount, allowSharing, paymentMethod } = result.input;
+    const soloFare = calculateBaseFare(pickupZone, destinationZone, seatCount);
+
+    // Check + insert in one transaction. The partial unique index (see migrations.ts) is the
+    // backstop if two requests from the same passenger race past the check.
+    // IMMEDIATE takes the write lock up front. With the default (deferred) transaction two
+    // simultaneous requests both read first and then deadlock on the insert (SQLITE_BUSY);
+    // this way the second one waits, then sees the first ride and gets the 409.
+    const rideRequest = await sequelize.transaction({ type: Transaction.TYPES.IMMEDIATE }, async (t: any) => {
+      const existing = await RideRequest.findOne({
+        where: { passengerId: passenger.id, status: { [Op.in]: [...ACTIVE_RIDE_STATUSES] } },
+        transaction: t,
       });
-    }
+      if (existing) throw new Error('ACTIVE_RIDE_EXISTS');
 
-    if (!DHAKA_ZONES.includes(pickupZone) || !DHAKA_ZONES.includes(destinationZone)) {
-      return res.status(400).json({ error: `Zones must be one of: ${DHAKA_ZONES.join(', ')}` });
-    }
-
-    if (!Number.isInteger(seatCount) || seatCount < 1) {
-      return res.status(400).json({ error: 'seatCount must be a positive integer.' });
-    }
-
-    if (pickupZone === destinationZone) {
-      return res.status(400).json({ error: 'Pickup and destination zones cannot be the same.' });
-    }
-
-    const passenger = await User.findByPk(passengerId);
-    if (!passenger) {
-      return res.status(401).json({ error: 'Passenger not found. Please log in again.' });
-    }
-    if (passenger.role !== 'PASSENGER') {
-      return res.status(403).json({ error: 'User is not a passenger.' });
-    }
-
-    // Fare at creation time: no pool yet (poolSize = 1, no discount)
-    const soloFare = calculateEstimatedFare(pickupZone, destinationZone, seatCount);
-
-    const rideRequest = await RideRequest.create({
-      passengerId,
-      pickupZone,
-      destinationZone,
-      seatCount,
-      baseFare: soloFare,
-      estimatedFare: soloFare,
-      poolDiscount: 0,
+      const created = await RideRequest.create(
+        {
+          passengerId: passenger.id,
+          pickupZone,
+          destinationZone,
+          seatCount,
+          allowSharing,
+          paymentMethod,
+          baseFare: soloFare,
+          estimatedFare: soloFare,
+          poolDiscount: 0,
+          status: 'REQUESTED',
+        },
+        { transaction: t }
+      );
+      await recordRideEvent(created, 'REQUESTED', null, { id: passenger.id, role: 'PASSENGER' }, t);
+      return created;
     });
 
     res.status(201).json({ rideRequest: formatRide(rideRequest) });
-  } catch (error) {
+  } catch (error: any) {
+    if (error.message === 'ACTIVE_RIDE_EXISTS' || error.name === 'SequelizeUniqueConstraintError') {
+      return res.status(409).json({
+        error: 'You already have an active ride. Finish or cancel it before requesting another.',
+        code: 'ACTIVE_RIDE_EXISTS',
+      });
+    }
     console.error('Create ride request error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -145,11 +236,14 @@ router.post('/', async (req: Request, res: Response) => {
 // GET /ride-requests/me
 // Passenger views their own requests (all statuses).
 // ---------------------------------------------------------------------------
-router.get('/me', async (req: Request, res: Response) => {
+router.get('/me', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const passengerId = req.query.passengerId as string;
-    if (!passengerId) {
-      return res.status(400).json({ error: 'passengerId is required in query params.' });
+    // The caller is the logged-in passenger; a passengerId that is not theirs is refused.
+    if (req.user!.role !== 'PASSENGER') return res.status(403).json({ error: 'Only passengers can view their requests.' });
+    const passengerId = req.user!.id;
+    const claimed = req.query.passengerId;
+    if (typeof claimed === 'string' && claimed !== passengerId) {
+      return res.status(403).json({ error: 'You can only access your own rides.' });
     }
 
     const requests = await RideRequest.findAll({
@@ -167,18 +261,17 @@ router.get('/me', async (req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 // GET /ride-requests/pending
 //
-// MATCHING RULE (documented):
+// MATCHING RULE (documented; see README "Direction-aware pool matching"):
 //   A request is shown to a driver if ALL of the following hold:
 //   1. status = REQUESTED (not yet accepted by anyone)
-//   2. seatCount <= vehicle's available seats
-//   3. If the vehicle already has an active pool (status in POOL_JOINABLE_STATUSES),
-//      the new request's destinationZone must match the existing pool's destination
-//      (exact zone match — see areZonesCompatible() in RideRequest.ts).
-//      If the pool has already STARTED, no new passengers can join.
-//   4. The new request's pickupZone must match the vehicle's current pool pickup zone
-//      (if a pool exists).
+//   2. seatCount <= the vehicle's available seats
+//   3. this driver has not declined it
+//   4. checkPoolJoin() accepts it for the rides already on the vehicle (MATCHED, DRIVER_ARRIVED or
+//      STARTED): private rides are never mixed, and the route must run the same way as EVERY ride
+//      in the pool (utils/routeDirection.ts). An empty vehicle accepts any route.
 //
-// This keeps pooling simple and auditable without real routing.
+// A ride that has already STARTED does not close the pool: compatible requests keep showing up so
+// the driver can add someone mid-trip. `midTrip` tells the caller that is the case.
 // ---------------------------------------------------------------------------
 router.get('/pending', async (req: Request, res: Response) => {
   try {
@@ -195,32 +288,29 @@ router.get('/pending', async (req: Request, res: Response) => {
 
     const availableSeats = vehicle.seatCapacity - vehicle.occupiedSeats;
 
-    // Find current active rides on this vehicle to enforce pooling constraints
-    const pooledRides: any[] = await RideRequest.findAll({
+    // Rides currently on this vehicle: they decide who else can join.
+    const pool = await loadPool(vehicle.id);
+    const midTrip = pool.some((r) => r.status === 'STARTED');
+
+    // Requests this driver has already declined never come back to them.
+    const declined = await RideDecline.findAll({ where: { driverId }, attributes: ['rideRequestId'] });
+    const declinedIds = declined.map((d: any) => d.rideRequestId as string);
+
+    const candidates: any[] = await RideRequest.findAll({
       where: {
-        vehicleId: vehicle.id,
-        status: { [Op.in]: [...POOL_JOINABLE_STATUSES] },
+        status: 'REQUESTED',
+        seatCount: { [Op.lte]: availableSeats },
+        ...(declinedIds.length > 0 ? { id: { [Op.notIn]: declinedIds } } : {}),
       },
-    });
-
-    const whereClause: any = {
-      status: 'REQUESTED',
-      seatCount: { [Op.lte]: availableSeats },
-    };
-
-    if (pooledRides.length > 0) {
-      // Pool already exists — new passengers must have same destination
-      const firstRide = pooledRides[0]!;
-      whereClause.pickupZone = firstRide.pickupZone;
-      whereClause.destinationZone = firstRide.destinationZone;
-    }
-
-    const pendingRequests: any[] = await RideRequest.findAll({
-      where: whereClause,
       order: [['createdAt', 'ASC']],
     });
+    const compatible = candidates.filter((c: any) => checkPoolJoin(pool, c).ok);
 
-    res.json({ requests: pendingRequests.map(formatRide) });
+    res.json({
+      requests: compatible.map((r: any) => ({ ...formatRide(r), joinsMidTrip: midTrip })),
+      midTrip,
+      availableSeats,
+    });
   } catch (error) {
     console.error('Get pending requests error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -230,29 +320,28 @@ router.get('/pending', async (req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 // POST /ride-requests/:id/accept
 //
-// Driver accepts a pending request. The ride is added to the driver's pool
-// on their active vehicle.
+// Driver accepts a pending request. The ride is added to the driver's pool on their active vehicle.
+// This is the ONLY way a passenger joins a pool, before the trip or in the middle of it.
 //
-// POOLING LOGIC:
-//   - If the vehicle has no active rides: accept freely (first in pool).
-//   - If the vehicle has active rides (pool exists):
-//       • Ensure the new request's pickup and destination match the pool
-//         (same rules as GET /pending).
-//       • Ensure pool is not yet STARTED (no new joiners after trip starts).
-//   - After accepting, recalculate ALL pool fares:
-//       • 2+ passengers → apply POOL_DISCOUNT to everyone
-//       • 1 passenger   → no discount
+// POOLING LOGIC (all inside one transaction, so it sees the pool exactly as it is when it commits):
+//   - checkPoolJoin(): private rides are never mixed, and the request's route must run the same way
+//     as every ride already on the vehicle. A STARTED ride does not block joining.
+//   - the seat claim below: capacity can never be exceeded, even by simultaneous accepts.
+//   - after accepting, every passenger who is not yet STARTED is re-priced (see utils/poolFares.ts).
 //
 // CONCURRENCY:
-//   We use a Sequelize transaction with a conditional atomic UPDATE on the
-//   Vehicle row. The WHERE clause for the seat increment includes a constraint
-//   `seatCapacity >= occupiedSeats + seatCount`. SQLite evaluates this
-//   atomically during the UPDATE. If the constraint fails (capacity full),
-//   `updatedCount` is 0 and we throw CAPACITY_EXCEEDED, rolling back the
-//   transaction. A second concurrent request that passes the constraint check
-//   but arrives after the first committed will see `updatedCount = 0` too
-//   because the arithmetic no longer satisfies the constraint.
+//   The transaction is IMMEDIATE: it takes SQLite's write lock up front, so two accepts for the same
+//   vehicle run one after the other, and the second one re-reads the pool the first one left.
+//   The seat claim is an atomic conditional UPDATE on the Vehicle row: occupiedSeats is incremented
+//   only where seatCapacity >= occupiedSeats + seatCount. If it changes no row, capacity was
+//   exceeded and CAPACITY_EXCEEDED rolls everything back.
 // ---------------------------------------------------------------------------
+class PoolRejected extends Error {
+  constructor(public verdict: Extract<PoolVerdict, { ok: false }>) {
+    super(verdict.code);
+  }
+}
+
 router.post('/:id/accept', async (req: Request, res: Response) => {
   try {
     const id = req.params.id as string;
@@ -273,54 +362,24 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Request not found or not in REQUESTED state.' });
     }
 
-    // Check pool compatibility if vehicle already has active rides
-    const pooledRides: any[] = await RideRequest.findAll({
-      where: {
-        vehicleId: vehicle.id,
-        status: { [Op.in]: [...POOL_JOINABLE_STATUSES] },
-      },
-    });
+    await sequelize.transaction({ type: Transaction.TYPES.IMMEDIATE }, async (t: any) => {
+      // ── STEP 1: Who is on the vehicle right now, and may this passenger join them? ──
+      const pool = await loadPool(vehicle.id, t);
+      const candidate: any = await RideRequest.findOne({ where: { id: rideReq.id, status: 'REQUESTED' }, transaction: t });
+      if (!candidate) throw new Error('ALREADY_TAKEN');
 
-    if (pooledRides.length > 0) {
-      const firstRide = pooledRides[0]!;
+      const verdict = checkPoolJoin(pool, candidate);
+      if (!verdict.ok) throw new PoolRejected(verdict);
 
-      // Rule: no new passengers once trip has started
-      const hasStarted = pooledRides.some((r: any) => r.status === 'STARTED');
-      if (hasStarted) {
-        return res.status(409).json({
-          error: 'Cannot add a new passenger: the trip has already started.',
-        });
-      }
-
-      // Rule: pickup zone must match
-      if (rideReq.pickupZone !== firstRide.pickupZone) {
-        return res.status(409).json({
-          error: `Pool incompatible: pickup zone must be ${firstRide.pickupZone} to join this pool.`,
-        });
-      }
-
-      // Rule: destination must be compatible (same zone)
-      if (!areZonesCompatible(firstRide.destinationZone, rideReq.destinationZone)) {
-        return res.status(409).json({
-          error: `Pool incompatible: destination zone must be ${firstRide.destinationZone} to join this pool.`,
-        });
-      }
-    }
-
-    const { sequelize } = require('../models/index');
-
-    await sequelize.transaction(async (t: any) => {
-      // ── STEP 1: Atomic seat reservation ────────────────────────────────
+      // ── STEP 2: Atomic seat reservation ────────────────────────────────
       // Increment occupiedSeats only if seatCapacity >= occupiedSeats + seatCount.
-      // This is the concurrency guard: two simultaneous requests race here;
-      // the losing one sees updatedCount=0 and gets CAPACITY_EXCEEDED.
       const [updatedCount] = await Vehicle.update(
-        { occupiedSeats: sequelize.literal(`occupiedSeats + ${rideReq.seatCount}`) },
+        { occupiedSeats: sequelize.literal(`occupiedSeats + ${candidate.seatCount}`) },
         {
           where: {
             id: vehicle.id,
             seatCapacity: {
-              [Op.gte]: sequelize.literal(`occupiedSeats + ${rideReq.seatCount}`),
+              [Op.gte]: sequelize.literal(`occupiedSeats + ${candidate.seatCount}`),
             },
           },
           transaction: t,
@@ -331,7 +390,7 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
         throw new Error('CAPACITY_EXCEEDED');
       }
 
-      // ── STEP 2: Atomically transition the ride to MATCHED ───────────────
+      // ── STEP 3: Atomically transition the ride to MATCHED ───────────────
       // WHERE status='REQUESTED' prevents double-acceptance by two drivers.
       const [reqUpdatedCount] = await RideRequest.update(
         {
@@ -340,7 +399,7 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
           driverId,
         },
         {
-          where: { id: rideReq.id, status: 'REQUESTED' },
+          where: { id: candidate.id, status: 'REQUESTED' },
           transaction: t,
         }
       );
@@ -349,11 +408,14 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
         throw new Error('ALREADY_TAKEN');
       }
 
-      // ── STEP 3: Recalculate pool fares for ALL passengers ───────────────
-      // Now that this ride is MATCHED (vehicleId is set), the pool has grown.
-      // recalculatePoolFares() counts all non-terminal rides on the vehicle
-      // and applies/removes the pool discount accordingly.
-      await recalculatePoolFares(vehicle.id, sequelize, t);
+      // ── STEP 4: Recalculate pool fares ──────────────────────────────────
+      // Now that this ride is MATCHED (vehicleId is set), the pool has grown. Everyone who has not
+      // started is re-estimated (100 + distance charge x share rate for the pool); rides that are on
+      // board are re-estimated from the pool's checkpoints. Only finished rides are settled and final.
+      await recalculatePoolFares(vehicle.id, t);
+
+      // ── STEP 5: History. `ridersOnboard` > 0 on this event means the passenger joined mid-trip. ──
+      await recordRideEvent({ ...candidate.toJSON(), vehicleId: vehicle.id }, 'MATCHED', 'REQUESTED', { id: driverId, role: 'DRIVER' }, t);
     });
 
     // Return the updated ride so the caller can see the new fare
@@ -363,13 +425,47 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
       rideRequest: formatRide(updated!.toJSON()),
     });
   } catch (error: any) {
-    console.error('Accept ride error:', error);
+    if (error instanceof PoolRejected) {
+      return res.status(409).json({ error: error.verdict.message, code: error.verdict.code });
+    }
     if (error.message === 'CAPACITY_EXCEEDED') {
       return res.status(409).json({ error: 'Not enough seats available.' });
     }
     if (error.message === 'ALREADY_TAKEN') {
       return res.status(409).json({ error: 'Ride request was already accepted.' });
     }
+    console.error('Accept ride error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /ride-requests/:id/decline   (driver login required)
+//
+// The driver dismisses a pending request. It stays REQUESTED for every other driver and stops
+// appearing in this driver's pending list. Declining twice is fine. A request that is no longer
+// REQUESTED (already taken or cancelled) gets 409.
+// ---------------------------------------------------------------------------
+router.post('/:id/decline', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    if (req.user!.role !== 'DRIVER') return res.status(403).json({ error: 'Only drivers can decline rides.' });
+    const driverId = req.user!.id;
+    const claimed = req.body?.driverId;
+    if (typeof claimed === 'string' && claimed !== driverId) {
+      return res.status(403).json({ error: 'You can only decline as yourself.' });
+    }
+
+    const rideReq: any = await RideRequest.findByPk(id);
+    if (!rideReq) return res.status(404).json({ error: 'Ride request not found.' });
+    if (rideReq.status !== 'REQUESTED') {
+      return res.status(409).json({ error: 'This request is no longer waiting for a driver.' });
+    }
+
+    await RideDecline.findOrCreate({ where: { rideRequestId: id, driverId } });
+    res.json({ message: 'Request declined.', rideId: id });
+  } catch (error) {
+    console.error('Decline ride error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -377,12 +473,12 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 // GET /ride-requests/:id/pool-info
 // Returns the pool summary for a matched ride: co-passengers count (no PII),
-// and whether a pool discount is being applied.
+// and how much of their own fare each passenger pays (the share rate).
 // ---------------------------------------------------------------------------
-router.get('/:id/pool-info', async (req: Request, res: Response) => {
+router.get('/:id/pool-info', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const passengerId = req.query.passengerId as string;
+    const passengerId = req.user!.id; // the logged-in passenger, never an id from the query
 
     const ride: any = await RideRequest.findByPk(id);
     if (!ride) return res.status(404).json({ error: 'Ride not found.' });
@@ -392,13 +488,13 @@ router.get('/:id/pool-info', async (req: Request, res: Response) => {
 
     if (!ride.vehicleId) {
       // Not yet matched — no pool info
-      return res.json({ poolSize: 1, coPassengers: 0, poolDiscountApplied: false });
+      return res.json({ poolSize: 1, coPassengers: 0, shareRatePercent: 100, poolDiscountApplied: false });
     }
 
     const poolRides: any[] = await RideRequest.findAll({
       where: {
         vehicleId: ride.vehicleId,
-        status: { [Op.notIn]: ['CANCELLED', 'COMPLETED'] },
+        status: { [Op.notIn]: [...TERMINAL_STATUSES] },
       },
     });
 
@@ -407,7 +503,8 @@ router.get('/:id/pool-info', async (req: Request, res: Response) => {
     res.json({
       poolSize,
       coPassengers: poolSize - 1,
-      poolDiscountApplied: poolSize >= 2,
+      shareRatePercent: shareRatePercent(poolSize, ride.allowSharing),
+      poolDiscountApplied: ride.poolDiscount > 0,
     });
   } catch (error) {
     console.error('Pool info error:', error);

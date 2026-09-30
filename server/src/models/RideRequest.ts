@@ -9,36 +9,31 @@ export const DHAKA_ZONES = [
   'Motijheel',
   'Mohammadpur',
   'Badda',
+  'Mohakhali',
+  'Gulshan 1',
 ] as const;
 
 export type DhakaZone = typeof DHAKA_ZONES[number];
 
-// ---------------------------------------------------------------------------
-// Pool compatibility: two requests are pool-compatible if they share the same
-// pickup zone AND the same destination zone.
-//
-// We intentionally keep this simple (exact zone match) rather than using
-// geographic routing. This is easy to understand, test, and extend later.
-// ---------------------------------------------------------------------------
-export function areZonesCompatible(
-  existingDestination: string,
-  newDestination: string
-): boolean {
-  // Exact match only — same destination zone required to share a pool.
-  return existingDestination === newDestination;
-}
+/** A single ride request can book 1–3 seats (the largest Tesla in the fleet has 3). */
+export const MIN_SEATS_PER_RIDE = 1;
+export const MAX_SEATS_PER_RIDE = 3;
+
+/** Statuses that count as "the passenger has a ride in progress" (everything but the terminal states). */
+export const ACTIVE_RIDE_STATUSES = ['REQUESTED', 'MATCHED', 'DRIVER_ARRIVED', 'STARTED'] as const;
 
 /**
  * Ride status state machine:
  *   REQUESTED → MATCHED → DRIVER_ARRIVED → STARTED → COMPLETED
  *                    ↓            ↓           ↓
- *                CANCELLED    CANCELLED   CANCELLED
+ *                CANCELLED    CANCELLED   CANCELLED_IN_TRANSIT
  *
  * Allowed transitions:
  *   REQUESTED     → MATCHED        (driver accepts the ride)
  *   MATCHED       → DRIVER_ARRIVED (driver marks arrived at pickup)
  *   DRIVER_ARRIVED→ STARTED        (driver starts the trip)
  *   STARTED       → COMPLETED      (driver completes the trip)
+ *   STARTED       → CANCELLED_IN_TRANSIT (passenger leaves mid-route, at a zone they name)
  *   REQUESTED     → CANCELLED      (passenger or driver cancels before match)
  *   MATCHED       → CANCELLED      (driver or passenger cancels after match)
  *   DRIVER_ARRIVED→ CANCELLED      (rare edge case — e.g. no-show)
@@ -51,7 +46,8 @@ export type RideStatus =
   | 'DRIVER_ARRIVED'
   | 'STARTED'
   | 'COMPLETED'
-  | 'CANCELLED';
+  | 'CANCELLED'
+  | 'CANCELLED_IN_TRANSIT';
 
 export const RIDE_STATUS_VALUES: RideStatus[] = [
   'REQUESTED',
@@ -60,17 +56,22 @@ export const RIDE_STATUS_VALUES: RideStatus[] = [
   'STARTED',
   'COMPLETED',
   'CANCELLED',
+  'CANCELLED_IN_TRANSIT',
 ];
 
 /**
- * Pool-joinable states: a driver can pool a new passenger onto a trip that
- * is in one of these states. Once the trip has STARTED no new passengers
- * are added.
- *
- * We include STARTED here so the pool-compatibility query finds it;
- * the accept route then checks r.status === 'STARTED' and rejects.
+ * Pool-joinable states: the rides on a vehicle that a new passenger has to be compatible with.
+ * STARTED is included on purpose: a trip that is already under way can still take passengers whose
+ * route runs the same way (see utils/pooling.ts and utils/routeDirection.ts).
  */
 export const POOL_JOINABLE_STATUSES: RideStatus[] = ['MATCHED', 'DRIVER_ARRIVED', 'STARTED'];
+
+/**
+ * Statuses a ride can never leave. CANCELLED_IN_TRANSIT is different from CANCELLED: the passenger
+ * was picked up and travelled part of the route, so it is a real (part-)trip in the history, with a
+ * pro-rated fare, not a request that never happened.
+ */
+export const TERMINAL_STATUSES: RideStatus[] = ['COMPLETED', 'CANCELLED', 'CANCELLED_IN_TRANSIT'];
 
 /** Returns null if the transition is allowed; an error string if not. */
 export function validateTransition(from: RideStatus, to: RideStatus): string | null {
@@ -78,9 +79,10 @@ export function validateTransition(from: RideStatus, to: RideStatus): string | n
     REQUESTED:      ['MATCHED', 'CANCELLED'],
     MATCHED:        ['DRIVER_ARRIVED', 'CANCELLED'],
     DRIVER_ARRIVED: ['STARTED', 'CANCELLED'],
-    STARTED:        ['COMPLETED'],
+    STARTED:        ['COMPLETED', 'CANCELLED_IN_TRANSIT'],
     COMPLETED:      [],
     CANCELLED:      [],
+    CANCELLED_IN_TRANSIT: [],
   };
 
   const allowed_targets = allowed[from] ?? [];
@@ -100,19 +102,36 @@ export class RideRequest extends Model {
   public destinationZone!: string;
   public seatCount!: number;
 
-  /** Full fare before pool discount — integer paisa. Set at creation; never changes. */
+  /** false = private ride: never pooled with other passengers. */
+  public allowSharing!: boolean;
+
+  /**
+   * This passenger's OWN fare when riding alone (their pickup → destination) — whole taka.
+   * Set at creation; never changes.
+   */
   public baseFare!: number;
 
   /**
-   * Final fare charged to this passenger — integer paisa.
-   * Recalculated whenever pool membership changes:
-   *   - When a second passenger joins → reduced by POOL_DISCOUNT
-   *   - When solo again (co-passenger cancelled) → reverted to baseFare
+   * What this passenger pays — whole taka, a multiple of ৳5.
+   *   estimatedFare = ৳100 + distance charge × share rate (100% alone, 70% with 2 passengers, 55% with 3)
+   * An ESTIMATE that follows the pool (see utils/poolFares.ts) until the passenger's own journey ends,
+   * when it is settled from the pool's checkpoints and becomes final (COMPLETED / CANCELLED_IN_TRANSIT,
+   * see segmentFare in utils/fareCalculator.ts). A private ride (allowSharing = false) always pays 100%.
    */
   public estimatedFare!: number;
 
-  /** Pool discount applied to this passenger — integer paisa. 0 when riding alone. */
+  /** What this passenger saves by sharing (baseFare − estimatedFare) — whole taka. 0 when riding alone. */
   public poolDiscount!: number;
+
+  /** Where the passenger left the ride, when it ended CANCELLED_IN_TRANSIT. `estimatedFare` is then the pro-rated charge. */
+  public cancellationZone!: string | null;
+
+  /** How the passenger pays: 'cash' (to the driver) or 'wallet' (TeslaPay). Chosen when the ride is requested. */
+  public paymentMethod!: string;
+  /** NOT_DUE until the journey ends, then CASH_DUE / PAID / FAILED (see utils/payments.ts). */
+  public paymentStatus!: string;
+  /** The final fare that was owed or charged (whole taka); null until the journey ends. */
+  public paymentAmount!: number | null;
 
   public status!: RideStatus;
   public readonly createdAt!: Date;
@@ -155,20 +174,47 @@ export const initRideRequest = (sequelize: any) => {
         allowNull: false,
         validate: { min: 1 },
       },
+      allowSharing: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: true,
+      },
       baseFare: {
-        type: DataTypes.INTEGER, // paisa — set at creation, never changes
+        type: DataTypes.INTEGER, // whole taka — set at creation, never changes
         allowNull: false,
         defaultValue: 0,
+        validate: { isInt: true }, // whole taka only: SQLite would store 12.5 in an INTEGER column
       },
       estimatedFare: {
-        type: DataTypes.INTEGER, // paisa — recalculated when pool changes
+        type: DataTypes.INTEGER, // whole taka — an estimate until the journey ends, then final
         allowNull: false,
         defaultValue: 0,
+        validate: { isInt: true },
       },
       poolDiscount: {
-        type: DataTypes.INTEGER, // paisa discount applied to this passenger
+        type: DataTypes.INTEGER, // whole taka saved by sharing (baseFare − estimatedFare)
         allowNull: false,
         defaultValue: 0,
+        validate: { isInt: true },
+      },
+      cancellationZone: {
+        type: DataTypes.ENUM(...DHAKA_ZONES),
+        allowNull: true,
+      },
+      paymentMethod: {
+        type: DataTypes.ENUM('cash', 'wallet'),
+        allowNull: false,
+        defaultValue: 'cash',
+      },
+      paymentStatus: {
+        type: DataTypes.ENUM('NOT_DUE', 'CASH_DUE', 'PAID', 'FAILED'),
+        allowNull: false,
+        defaultValue: 'NOT_DUE',
+      },
+      paymentAmount: {
+        type: DataTypes.INTEGER, // whole taka, set when the journey ends
+        allowNull: true,
+        validate: { isInt: true },
       },
       status: {
         type: DataTypes.ENUM(...RIDE_STATUS_VALUES),

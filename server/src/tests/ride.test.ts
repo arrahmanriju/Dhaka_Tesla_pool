@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { app } from '../index';
 import { sequelize, User, Vehicle, RideRequest } from '../models';
+import { asUser } from './helpers';
 
 describe('Ride Request API and Logic', () => {
   beforeAll(async () => {
@@ -33,12 +34,8 @@ describe('Ride Request API and Logic', () => {
       })).toJSON() as any;
 
       // Two requests of 3 seats each
-      const res1 = await request(app).post('/ride-requests').send({
-        passengerId: passenger1.id, pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 3,
-      });
-      const res2 = await request(app).post('/ride-requests').send({
-        passengerId: passenger2.id, pickupZone: 'Dhanmondi', destinationZone: 'Banani', seatCount: 3,
-      });
+      const res1 = await request(app).post('/ride-requests').set(asUser(passenger1.id)).send({ pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 3 });
+      const res2 = await request(app).post('/ride-requests').set(asUser(passenger2.id)).send({ pickupZone: 'Dhanmondi', destinationZone: 'Banani', seatCount: 3 });
       const req1 = res1.body.rideRequest;
       const req2 = res2.body.rideRequest;
 
@@ -63,9 +60,7 @@ describe('Ride Request API and Logic', () => {
       const driver = (await User.create({ name: 'D', email: 'd@test.com', password: 'pwd', role: 'DRIVER' })).toJSON() as any;
       await Vehicle.create({ driverId: driver.id, modelName: 'Car', seatCapacity: 4, licensePlate: 'CAR-10' });
 
-      const resReq = await request(app).post('/ride-requests').send({
-        passengerId: passenger.id, pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1,
-      });
+      const resReq = await request(app).post('/ride-requests').set(asUser(passenger.id)).send({ pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1 });
       const rideId = resReq.body.rideRequest.id;
 
       // Accept the ride to assign the driver (moves to MATCHED)
@@ -78,24 +73,38 @@ describe('Ride Request API and Logic', () => {
   });
 
   describe('Fares', () => {
-    it('calculates Nusrat and Rafiq pooled fares correctly', async () => {
-      // Test formula: baseFare(100) + distanceCharge - poolDiscount(30 for <= 2 seats)
-      // Assuming Gulshan -> Banani distance is 2km.
-      // Fare = 100 + (2km * 20 * 1 seat) - 30 = 110 BDT.
-      
+    it('stores the full solo fare at creation; the pool discount only applies once someone joins', async () => {
+      // Solo fare: 100 + distanceKm * 20 * seats (whole taka). When 2+ passengers share the car, the ৳100
+      // base fare is still charged in full and only the distance charge is discounted: 70% of it with 2
+      // on board, 55% with 3, rounded to the nearest ৳5 (see segmentFares.test.ts for the full model).
+      // Gulshan -> Banani is 2 km.
+      // Solo, 1 seat: 100 + 2 * 20 * 1 = ৳140.
       const p1 = (await User.create({ name: 'Nusrat', email: 'nusrat@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
-      const res1 = await request(app).post('/ride-requests').send({
-        passengerId: p1.id, pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1,
-      });
-      expect(res1.body.rideRequest.estimatedFare).toBe(11000); // 110 BDT in paisa
+      const res1 = await request(app).post('/ride-requests').set(asUser(p1.id)).send({ pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1 });
+      expect(res1.body.rideRequest.estimatedFare).toBe(140);
 
-      // Rafiq booking 4 seats for same route (no pool discount)
-      // Fare = 100 + (2km * 20 * 4 seats) - 0 = 260 BDT.
+      // Solo, 3 seats (the maximum): 100 + 2 * 20 * 3 = ৳220.
       const p2 = (await User.create({ name: 'Rafiq', email: 'rafiq@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
-      const res2 = await request(app).post('/ride-requests').send({
-        passengerId: p2.id, pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 4,
-      });
-      expect(res2.body.rideRequest.estimatedFare).toBe(26000); // 260 BDT
+      const res2 = await request(app).post('/ride-requests').set(asUser(p2.id)).send({ pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 3 });
+      expect(res2.body.rideRequest.estimatedFare).toBe(220);
+    });
+  });
+
+  describe('Fares once a second passenger is matched', () => {
+    it('quotes both the shared rate: 100 + 40 × 70% = 128 → ৳130 each (the ৳100 base is not discounted)', async () => {
+      const driver = (await User.create({ name: 'D', email: 'dq@test.com', password: 'pwd', role: 'DRIVER' })).toJSON() as any;
+      await Vehicle.create({ driverId: driver.id, modelName: 'Car', seatCapacity: 4, licensePlate: 'CAR-Q1' });
+      const a = (await User.create({ name: 'A', email: 'aq@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
+      const b = (await User.create({ name: 'B', email: 'bq@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
+      const ra = (await request(app).post('/ride-requests').set(asUser(a.id)).send({ pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1 })).body.rideRequest.id;
+      const rb = (await request(app).post('/ride-requests').set(asUser(b.id)).send({ pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1 })).body.rideRequest.id;
+      await request(app).post(`/ride-requests/${ra}/accept`).send({ driverId: driver.id });
+      await request(app).post(`/ride-requests/${rb}/accept`).send({ driverId: driver.id });
+
+      for (const id of [ra, rb]) {
+        const r = (await request(app).get(`/passenger/rides/${id === ra ? ra : rb}`).set(asUser(id === ra ? a.id : b.id))).body.ride;
+        expect(r).toMatchObject({ baseFare: 140, estimatedFare: 130, poolDiscount: 10, fareFinal: false });
+      }
     });
   });
 
@@ -104,30 +113,26 @@ describe('Ride Request API and Logic', () => {
       const p1 = (await User.create({ name: 'P1', email: 'p1@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
       const p2 = (await User.create({ name: 'P2', email: 'p2@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
       
-      const resReq = await request(app).post('/ride-requests').send({
-        passengerId: p1.id, pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1,
-      });
+      const resReq = await request(app).post('/ride-requests').set(asUser(p1.id)).send({ pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1 });
       const p1RideId = resReq.body.rideRequest.id;
 
-      const resView = await request(app).get(`/passenger/rides/${p1RideId}?passengerId=${p2.id}`);
-      expect(resView.status).toBe(404);
+      const resView = await request(app).get(`/passenger/rides/${p1RideId}`).set(asUser(p2.id));
+      expect(resView.status).toBe(403);
 
-      const resCancel = await request(app).patch(`/passenger/rides/${p1RideId}/cancel`).send({
+      const resCancel = await request(app).patch(`/passenger/rides/${p1RideId}/cancel`).set(asUser(p2.id)).send({
         passengerId: p2.id
       });
-      expect(resCancel.status).toBe(404);
+      expect(resCancel.status).toBe(403);
     });
   });
 
   describe('Cancellation', () => {
     it('allows cancellation in REQUESTED state', async () => {
       const p1 = (await User.create({ name: 'P1', email: 'p1@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
-      const resReq = await request(app).post('/ride-requests').send({
-        passengerId: p1.id, pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1,
-      });
+      const resReq = await request(app).post('/ride-requests').set(asUser(p1.id)).send({ pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1 });
       const rideId = resReq.body.rideRequest.id;
 
-      const resCancel = await request(app).patch(`/passenger/rides/${rideId}/cancel`).send({
+      const resCancel = await request(app).patch(`/passenger/rides/${rideId}/cancel`).set(asUser(p1.id)).send({
         passengerId: p1.id
       });
       expect(resCancel.status).toBe(200);
@@ -138,15 +143,13 @@ describe('Ride Request API and Logic', () => {
       const d1 = (await User.create({ name: 'D1', email: 'd1@test.com', password: 'pwd', role: 'DRIVER' })).toJSON() as any;
       await Vehicle.create({ driverId: d1.id, modelName: 'Car', seatCapacity: 4, licensePlate: 'CAR-C2' });
 
-      const resReq = await request(app).post('/ride-requests').send({
-        passengerId: p1.id, pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1,
-      });
+      const resReq = await request(app).post('/ride-requests').set(asUser(p1.id)).send({ pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1 });
       const rideId = resReq.body.rideRequest.id;
 
       await request(app).post(`/ride-requests/${rideId}/accept`).send({ driverId: d1.id });
       await request(app).patch(`/driver/rides/${rideId}/arrive`).send({ driverId: d1.id });
 
-      const resCancel = await request(app).patch(`/passenger/rides/${rideId}/cancel`).send({
+      const resCancel = await request(app).patch(`/passenger/rides/${rideId}/cancel`).set(asUser(p1.id)).send({
         passengerId: p1.id
       });
       expect(resCancel.status).toBe(409); // Cannot cancel

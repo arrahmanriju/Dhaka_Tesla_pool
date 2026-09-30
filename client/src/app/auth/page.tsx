@@ -7,7 +7,7 @@ import { saveAuth } from '@/lib/auth';
 import { normalizePhone } from '@/lib/phone';
 import { Spinner, ErrorBanner } from '@/components/UI';
 import { PreferenceControls } from '@/components/PreferenceControls';
-import { usePreferences } from '@/lib/preferences';
+import { usePreferences, useFormatApiError } from '@/lib/preferences';
 
 export default function AuthPage() {
   const [isLogin, setIsLogin] = useState(true);
@@ -20,6 +20,7 @@ export default function AuthPage() {
   const [error, setError] = useState('');
   const router = useRouter();
   const { t } = usePreferences();
+  const formatError = useFormatApiError();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -36,8 +37,8 @@ export default function AuthPage() {
       // A brand-new driver still has to onboard (vehicle, NID, home zone) before going online.
       const nextDriverPage = isLogin ? '/driver' : '/driver/onboarding';
       router.push(data.user.role === 'DRIVER' ? nextDriverPage : '/passenger');
-    } catch (err: any) {
-      setError(err.message || t('auth.failed'));
+    } catch (err) {
+      setError(formatError(err));
     } finally {
       setLoading(false);
     }

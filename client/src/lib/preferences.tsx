@@ -17,6 +17,7 @@ import {
   type PluralBase,
   type TranslationKey,
 } from './translations';
+import { describeError } from './errors';
 
 export type Theme = 'dark' | 'light';
 
@@ -142,19 +143,13 @@ export function usePreferences(): PreferencesValue {
 }
 
 /**
- * Formats an API error as "Error <status>: <message>" in the current language.
- * The returned function has a stable identity, so it is safe inside `useCallback`
- * deps without re-running data loads when the language changes.
+ * Turns an error from the server (or a failed request) into a friendly message in the current language:
+ * never a status code, never "Failed to fetch" (see lib/errors.ts). The returned function has a stable
+ * identity, so it is safe inside `useCallback` deps without re-running data loads when the language changes.
  */
 export function useFormatApiError() {
   const { t } = usePreferences();
   const tRef = useRef(t);
   useEffect(() => { tRef.current = t; }, [t]);
-  return useCallback(
-    (err: { status?: number; message: string }) =>
-      err.status
-        ? tRef.current('common.errorWithStatus', { status: err.status, message: err.message })
-        : err.message,
-    [],
-  );
+  return useCallback((err: unknown) => describeError(err, tRef.current), []);
 }

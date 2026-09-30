@@ -4,6 +4,7 @@ import path from 'path';
 import { app } from '../index';
 import { sequelize, storagePath, User, Vehicle, RideRequest, DriverProfile } from '../models';
 import { UPLOADS_DIR } from '../utils/onboarding';
+import { asUser } from './helpers';
 
 const uploadsDir = UPLOADS_DIR(storagePath);
 const uploadCount = () => (fs.existsSync(uploadsDir) ? fs.readdirSync(uploadsDir).length : 0);
@@ -366,8 +367,7 @@ describe('Driver onboarding', () => {
       await onboard(driver.token, form({ nid: NID }));
 
       const created = await request(app)
-        .post('/ride-requests')
-        .send({ passengerId: passenger.id, pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1 });
+        .post('/ride-requests').set(asUser(passenger.id)).send({ pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1 });
       expect(created.status).toBe(201);
       const rideId = created.body.rideRequest.id;
       const accepted = await request(app).post(`/ride-requests/${rideId}/accept`).send({ driverId: driver.id });
@@ -376,10 +376,10 @@ describe('Driver onboarding', () => {
       const responses = [
         created,
         accepted,
-        await request(app).get(`/passenger/rides/active?passengerId=${passenger.id}`),
-        await request(app).get(`/passenger/rides/${rideId}?passengerId=${passenger.id}`),
-        await request(app).get(`/passenger/rides/history?passengerId=${passenger.id}`),
-        await request(app).get(`/ride-requests/me?passengerId=${passenger.id}`),
+        await request(app).get('/passenger/rides/active').set(asUser(passenger.id)),
+        await request(app).get(`/passenger/rides/${rideId}`).set(asUser(passenger.id)),
+        await request(app).get('/passenger/rides/history').set(asUser(passenger.id)),
+        await request(app).get('/ride-requests/me').set(asUser(passenger.id)),
         await request(app).get('/auth/me').set('Authorization', `Bearer ${passenger.token}`),
       ];
       for (const r of responses) {
@@ -391,7 +391,7 @@ describe('Driver onboarding', () => {
       // and the passenger can't use the onboarding endpoint to read it either
       expect((await getOnboarding(passenger.token)).status).toBe(403);
       // the vehicle a passenger *does* see carries the nickname + Tesla ID, but no NID
-      const active = await request(app).get(`/passenger/rides/active?passengerId=${passenger.id}`);
+      const active = await request(app).get('/passenger/rides/active').set(asUser(passenger.id));
       expect(active.body.rides[0].vehicle).toMatchObject({ modelName: 'Bullet', licensePlate: 'DTP-0001' });
     });
 

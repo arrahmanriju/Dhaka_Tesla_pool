@@ -4,16 +4,24 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { AppNav } from '@/components/AppNav';
 import { StatusBadge } from '@/components/StatusBadge';
-import { LoadingScreen, EmptyState, ErrorBanner, SuccessBanner, Spinner, SeatCount } from '@/components/UI';
+import { MidTripOffers, MID_TRIP_POLL_MS } from '@/components/MidTripOffers';
+import { PoolTimeline } from '@/components/PoolTimeline';
+import { PaymentStatusTag } from '@/components/PaymentStatusTag';
+import { LoadingScreen, EmptyState, ErrorBanner, ErrorState, SuccessBanner, Spinner, SeatCount } from '@/components/UI';
 import { driverApi, ApiError, type Ride, type Vehicle } from '@/lib/api';
 import { getUser } from '@/lib/auth';
 import { usePreferences, useFormatApiError } from '@/lib/preferences';
 
 type Tab = 'pending' | 'active' | 'vehicle' | 'history';
 
+/** How often the active tab re-reads the pool, so earnings follow passengers joining or leaving. */
+const EARNINGS_REFRESH_MS = 10_000;
+
 export default function DriverDashboard() {
   const router = useRouter();
   const { t } = usePreferences();
+  const formatError = useFormatApiError();
+  const [toggleError, setToggleError] = useState('');
   const [user, setUser] = useState<ReturnType<typeof getUser>>(null);
   const [tab, setTab] = useState<Tab>('active');
   const [isOnline, setIsOnline] = useState(false);
@@ -32,13 +40,13 @@ export default function DriverDashboard() {
   const handleToggleOnline = async () => {
     if (!user) return;
     if (!isOnline && onboarded === false) return; // must finish onboarding first
-    setTogglingOnline(true);
+    setTogglingOnline(true); setToggleError('');
     try {
       const res = await driverApi.setOnlineStatus(user.id, !isOnline);
       setIsOnline(res.user.isOnline ?? !isOnline);
     } catch (err) {
       if (err instanceof ApiError && err.code === 'ONBOARDING_REQUIRED') setOnboarded(false);
-      // otherwise: silently revert
+      else setToggleError(formatError(err)); // the switch stays as it was, and the driver is told why
     } finally {
       setTogglingOnline(false);
     }
@@ -108,6 +116,8 @@ export default function DriverDashboard() {
           </label>
         </div>
 
+        {toggleError && <ErrorBanner message={toggleError} />}
+
         {tab === 'pending' && <PendingRequestsTab driverId={user.id} isOnline={isOnline} />}
         {tab === 'active'  && <ActiveRidesTab     driverId={user.id} />}
         {tab === 'vehicle' && <VehicleTab         driverId={user.id} />}
@@ -126,23 +136,38 @@ function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline
   const [noVehicle, setNoVehicle] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // The list itself could not be loaded (a failed accept uses `error` instead and keeps the list)
+  const [loadError, setLoadError] = useState('');
   const [accepting, setAccepting] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState('');
+  // true while one of this driver's rides is STARTED (reported by the server with the list)
+  const [midTrip, setMidTrip] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true); setError('');
+  // `silent` refreshes in the background: no spinner, and a failed refresh keeps the list on screen.
+  // The server only returns requests that fit the vehicle, so nothing is filtered here.
+  const load = useCallback(async (silent = false) => {
+    if (!silent) { setLoading(true); setError(''); setLoadError(''); }
     try {
       const res = await driverApi.getPendingRides(driverId);
       setRides(res.rides);
       setNoVehicle(res.noVehicle);
-    } catch (err: any) {
-      setError(formatError(err));
+      setMidTrip(res.midTrip);
+      setLoadError(''); // a background refresh that works clears an earlier failure
+    } catch (err) {
+      if (!silent) setLoadError(formatError(err));
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [driverId, formatError]);
 
   useEffect(() => { load(); }, [load]);
+
+  // While a trip is under way new compatible riders can appear at any time: keep polling (no websockets).
+  useEffect(() => {
+    if (!midTrip) return;
+    const timer = setInterval(() => { if (!document.hidden) load(true); }, MID_TRIP_POLL_MS);
+    return () => clearInterval(timer);
+  }, [midTrip, load]);
 
   const handleAccept = async (rideId: string) => {
     setAccepting(rideId); setError(''); setSuccessMsg('');
@@ -150,7 +175,7 @@ function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline
       await driverApi.acceptRide(rideId, driverId);
       setSuccessMsg(t('d.pending.accepted'));
       await load();
-    } catch (err: any) {
+    } catch (err) {
       setError(formatError(err));
     } finally {
       setAccepting(null);
@@ -166,7 +191,7 @@ function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline
           <h1 className="section-title">{t('d.pending.title')}</h1>
           <p className="section-desc">{t('d.pending.desc')}</p>
         </div>
-        <button className="btn btn--ghost btn--sm" onClick={load} id="refresh-pending">{t('common.refresh')}</button>
+        <button className="btn btn--ghost btn--sm" onClick={() => load()} id="refresh-pending">{t('common.refresh')}</button>
       </div>
 
       {!isOnline && !noVehicle && (
@@ -176,8 +201,15 @@ function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline
       )}
       {error && <ErrorBanner message={error} />}
       {successMsg && <SuccessBanner message={successMsg} />}
+      {midTrip && !noVehicle && (
+        <p className="form-hint" id="pending-live" aria-live="polite" style={{ marginBottom: 12 }}>
+          🔄 {t('d.pending.live', { sec: MID_TRIP_POLL_MS / 1000 })}
+        </p>
+      )}
 
-      {noVehicle ? (
+      {loadError ? (
+        <ErrorState message={loadError} onRetry={() => load()} />
+      ) : noVehicle ? (
         <EmptyState
           icon="🔧"
           title={t('d.pending.noVehicleTitle')}
@@ -203,13 +235,14 @@ function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline
                 <span className="ride-card__arrow">→</span>
                 <span className="ride-card__zone">{tz(ride.destinationZone)}</span>
                 <StatusBadge status={ride.status} />
+                {ride.joinsMidTrip && <span className="badge badge--matched">{t('d.offers.midTrip')}</span>}
               </div>
               <div className="ride-card__meta">
                 <span className="ride-card__meta-item">
                   <SeatCount n={ride.seatCount} />
                 </span>
                 <span className="ride-card__meta-item">
-                  {t('common.fare')} <strong>৳{ride.estimatedFareBDT}</strong>
+                  {t('common.fare')} <strong>৳{ride.estimatedFare}</strong>
                 </span>
                 <span className="ride-card__meta-item" style={{ color: 'var(--text-muted)' }}>
                   {new Date(ride.createdAt).toLocaleTimeString(locale)}
@@ -236,27 +269,40 @@ function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline
 
 // ─── Active Rides Tab ──────────────────────────────────────────────────────
 function ActiveRidesTab({ driverId }: { driverId: string }) {
-  const { t } = usePreferences();
+  const { t, tp } = usePreferences();
   const formatError = useFormatApiError();
   const [rides, setRides] = useState<Ride[]>([]);
+  // What the passengers in this pool pay in total = what the driver earns for the ride
+  const [totalEarnings, setTotalEarnings] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // The pool itself could not be loaded (a failed action uses `error` instead and keeps the list)
+  const [loadError, setLoadError] = useState('');
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState('');
 
-  const load = useCallback(async () => {
-    setLoading(true); setError('');
+  // `silent` refreshes in the background: no spinner, and a failed refresh is ignored.
+  const load = useCallback(async (silent = false) => {
+    if (!silent) { setLoading(true); setError(''); setLoadError(''); }
     try {
       const res = await driverApi.getActiveRides(driverId);
       setRides(res.rides);
-    } catch (err: any) {
-      setError(formatError(err));
+      setTotalEarnings(res.totalEarnings);
+      setLoadError('');
+    } catch (err) {
+      if (!silent) setLoadError(formatError(err));
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [driverId, formatError]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Earnings change when a passenger joins or leaves the pool (until the trip starts).
+  useEffect(() => {
+    const timer = setInterval(() => { if (!document.hidden) load(true); }, EARNINGS_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [load]);
 
   const doAction = async (
     rideId: string,
@@ -267,7 +313,7 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
       await driverApi[action](rideId, driverId);
       setSuccessMsg(t(`d.active.done.${action}`));
       await load();
-    } catch (err: any) {
+    } catch (err) {
       setError(formatError(err));
     } finally {
       setActionLoading(null);
@@ -276,9 +322,13 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
 
   if (loading) return <LoadingScreen label={t('loading.activeRides')} />;
 
-  // Only show EmptyState if load succeeded (no error). If there's an error,
-  // the ErrorBanner above already tells the user what went wrong.
-  const showEmpty = !error && rides.length === 0;
+  // The empty state means "we checked and there are none". If the load failed we do not know that,
+  // so the failure state is shown instead (with a retry).
+  const showEmpty = !loadError && rides.length === 0;
+  // While any passenger is travelling, the driver is offered compatible requests to add mid-trip.
+  const tripStarted = rides.some((r) => r.status === 'STARTED');
+  // Re-read the pool history whenever a ride's status changes
+  const historyKey = rides.map((r) => `${r.id}:${r.status}`).join(',');
 
   return (
     <div className="animate-in">
@@ -287,13 +337,15 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
           <h1 className="section-title">{t('d.active.title')}</h1>
           <p className="section-desc">{t('d.active.desc')}</p>
         </div>
-        <button className="btn btn--ghost btn--sm" onClick={load} id="refresh-active-driver">{t('common.refresh')}</button>
+        <button className="btn btn--ghost btn--sm" onClick={() => load()} id="refresh-active-driver">{t('common.refresh')}</button>
       </div>
 
       {error && <ErrorBanner message={error} />}
       {successMsg && <SuccessBanner message={successMsg} />}
 
-      {showEmpty ? (
+      {loadError && rides.length === 0 ? (
+        <ErrorState message={loadError} onRetry={() => load()} />
+      ) : showEmpty ? (
         <EmptyState
           icon="🛺"
           title={t('d.active.emptyTitle')}
@@ -301,6 +353,19 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
         />
       ) : rides.length > 0 ? (
         <div className="ride-list">
+          {/* Total earnings for this ride: the sum of what the passengers in the pool pay */}
+          <div className="earnings-card" id="ride-earnings" aria-live="polite">
+            <div>
+              <div className="earnings-card__label">{t('d.active.earningsTitle')}</div>
+              <div className="earnings-card__amount">৳{totalEarnings}</div>
+              <div className="earnings-card__sub">
+                {tp('d.active.earningsFrom', rides.length)}
+                {rides.every((r) => r.fareFinal) && ` · ✓ ${t('fare.locked')}`}
+              </div>
+            </div>
+            <p className="earnings-card__note">{t('d.active.earningsNote')}</p>
+          </div>
+          {tripStarted && <MidTripOffers driverId={driverId} onJoined={() => load(true)} />}
           {rides.map((ride) => (
             <ActiveDriverRideCard
               key={ride.id}
@@ -309,6 +374,7 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
               actionLoading={actionLoading}
             />
           ))}
+          <PoolTimeline refreshKey={historyKey} />
         </div>
       ) : null}
     </div>
@@ -340,6 +406,7 @@ function ActiveDriverRideCard({
         <span className="ride-card__arrow">→</span>
         <span className="ride-card__zone">{tz(ride.destinationZone)}</span>
         <StatusBadge status={ride.status} />
+        <PaymentStatusTag ride={ride} />
       </div>
 
       <div className="ride-card__meta">
@@ -347,7 +414,7 @@ function ActiveDriverRideCard({
           <SeatCount n={ride.seatCount} />
         </span>
         <span className="ride-card__meta-item">
-          {t('common.fare')} <strong>৳{ride.estimatedFareBDT}</strong>
+          {t('common.fare')} <strong>৳{ride.estimatedFare}</strong>
         </span>
         {ride.vehicle && (
           <span className="ride-card__meta-item">
@@ -385,17 +452,21 @@ function ActiveDriverRideCard({
 // ─── Vehicle Tab ───────────────────────────────────────────────────────────
 function VehicleTab({ driverId }: { driverId: string }) {
   const { t } = usePreferences();
+  const formatError = useFormatApiError();
   const router = useRouter();
   const [vehicle, setVehicle] = useState<Vehicle | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    setLoading(true); setError('');
     driverApi.getVehicle(driverId)
       .then((res) => setVehicle(res.vehicle))
-      .catch((err) => setError(err.message))
+      .catch((err) => setError(formatError(err)))
       .finally(() => setLoading(false));
-  }, [driverId]);
+  }, [driverId, formatError]);
+
+  useEffect(() => { load(); }, [load]);
 
   if (loading) return <LoadingScreen label={t('loading.vehicle')} />;
 
@@ -408,9 +479,9 @@ function VehicleTab({ driverId }: { driverId: string }) {
         </div>
       </div>
 
-      {error && <ErrorBanner message={error} />}
-
-      {vehicle ? (
+      {error ? (
+        <ErrorState message={error} onRetry={load} />
+      ) : vehicle ? (
         <div className="card card--raised">
           <div className="card__header">
             <div>
@@ -459,21 +530,28 @@ function VehicleTab({ driverId }: { driverId: string }) {
 // ─── History Tab ───────────────────────────────────────────────────────────
 function HistoryTab({ driverId }: { driverId: string }) {
   const { t, tz, locale } = usePreferences();
+  const formatError = useFormatApiError();
   const [rides, setRides] = useState<Ride[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    setLoading(true); setError('');
     driverApi.getHistory(driverId)
       .then((res) => setRides(res.rides))
-      .catch((err) => setError(err.message))
+      .catch((err) => setError(formatError(err)))
       .finally(() => setLoading(false));
-  }, [driverId]);
+  }, [driverId, formatError]);
+
+  useEffect(() => { load(); }, [load]);
 
   if (loading) return <LoadingScreen label={t('loading.trips')} />;
 
   const completed = rides.filter((r) => r.status === 'COMPLETED');
-  const totalEarned = completed.reduce((s, r) => s + r.estimatedFare, 0);
+  // A passenger who left mid-route still paid for the part they travelled (their pro-rated fare).
+  const totalEarned = rides
+    .filter((r) => r.status === 'COMPLETED' || r.status === 'CANCELLED_IN_TRANSIT')
+    .reduce((s, r) => s + r.estimatedFare, 0);
 
   return (
     <div className="animate-in">
@@ -484,7 +562,7 @@ function HistoryTab({ driverId }: { driverId: string }) {
         </div>
       </div>
 
-      {error && <ErrorBanner message={error} />}
+      {error && <ErrorState message={error} onRetry={load} />}
 
       {rides.length > 0 && (
         <div className="stats-row" style={{ marginBottom: 24 }}>
@@ -498,12 +576,12 @@ function HistoryTab({ driverId }: { driverId: string }) {
           </div>
           <div className="stat-card">
             <div className="stat-card__label">{t('d.history.earned')}</div>
-            <div className="stat-card__value">৳{(totalEarned / 100).toFixed(0)}</div>
+            <div className="stat-card__value">৳{totalEarned}</div>
           </div>
         </div>
       )}
 
-      {rides.length === 0 ? (
+      {error ? null : rides.length === 0 ? (
         <EmptyState
           icon="🕓"
           title={t('d.history.emptyTitle')}
@@ -518,13 +596,14 @@ function HistoryTab({ driverId }: { driverId: string }) {
                 <span className="ride-card__arrow">→</span>
                 <span className="ride-card__zone">{tz(ride.destinationZone)}</span>
                 <StatusBadge status={ride.status} />
+                <PaymentStatusTag ride={ride} />
               </div>
               <div className="ride-card__meta">
                 <span className="ride-card__meta-item">
                   <SeatCount n={ride.seatCount} />
                 </span>
                 <span className="ride-card__meta-item">
-                  {t('common.fare')} <strong>৳{ride.estimatedFareBDT}</strong>
+                  {t('common.fare')} <strong>৳{ride.estimatedFare}</strong>
                 </span>
                 <span className="ride-card__meta-item" style={{ color: 'var(--text-muted)' }}>
                   {new Date(ride.updatedAt).toLocaleDateString(locale, {

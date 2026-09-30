@@ -9,6 +9,8 @@ export class User extends Model {
   declare role: 'DRIVER' | 'PASSENGER';
   declare password: string;
   declare isOnline: boolean;
+  /** TeslaPay wallet balance (simulated), whole taka like every fare. Never negative. */
+  declare walletBalance: number;
   declare readonly createdAt: Date;
   declare readonly updatedAt: Date;
 }
@@ -54,6 +56,14 @@ export const initUser = (sequelize: any) => {
         type: DataTypes.BOOLEAN,
         allowNull: false,
         defaultValue: false,
+      },
+      // The passenger's simulated TeslaPay wallet, in whole taka (the unit fares are stored in).
+      // Only ever reduced by a conditional UPDATE that keeps it >= 0 (see utils/payments.ts).
+      walletBalance: {
+        type: DataTypes.INTEGER,
+        allowNull: false,
+        defaultValue: 0,
+        validate: { min: 0, isInt: true }, // whole taka only
       },
     },
     {

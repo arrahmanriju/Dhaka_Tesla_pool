@@ -1,7 +1,13 @@
 import { Router, Request, Response } from 'express';
-import { Op } from 'sequelize';
-import { User, Vehicle, RideRequest, DriverProfile } from '../models';
-import { validateTransition, RideStatus } from '../models/RideRequest';
+import { Op, Transaction } from 'sequelize';
+import { sequelize, User, Vehicle, RideRequest, DriverProfile, RideEvent } from '../models';
+import { validateTransition, RideStatus, TERMINAL_STATUSES } from '../models/RideRequest';
+import { isFareFinal, recalculatePoolFares } from '../utils/poolFares';
+import { recordBoarding, recordExit } from '../utils/checkpoints';
+import { settleJourney } from '../utils/journeySettlement';
+import { collectPayment } from '../utils/payments';
+import { recordRideEvent, joinedMidTrip } from '../utils/rideEvents';
+import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 
 const router = Router();
 
@@ -97,10 +103,17 @@ async function advanceRide(
     return;
   }
 
-  await RideRequest.update(
-    { status: targetStatus },
-    { where: { id: rideId } }
-  );
+  await sequelize.transaction({ type: Transaction.TYPES.IMMEDIATE }, async (t: any) => {
+    await RideRequest.update({ status: targetStatus }, { where: { id: rideId }, transaction: t });
+    await recordRideEvent(ride, targetStatus, ride.status, { id: driverId, role: 'DRIVER' }, t);
+
+    if (targetStatus === 'STARTED') {
+      // The passenger boards: a checkpoint at their pickup zone (the first of the trip, or a mid-trip
+      // join), then every open fare is re-estimated for the new number of passengers on board.
+      await recordBoarding(ride, t);
+      if (ride.vehicleId) await recalculatePoolFares(ride.vehicleId, t);
+    }
+  });
 
   res.json({ message: `Ride status updated to ${targetStatus}.`, rideId, status: targetStatus });
 }
@@ -141,25 +154,54 @@ router.patch('/rides/:id/complete', async (req: Request, res: Response) => {
     const err = validateTransition(ride.status as RideStatus, 'COMPLETED');
     if (err) { res.status(409).json({ error: err }); return; }
 
-    const { sequelize } = require('../models/index');
-
-    await sequelize.transaction(async (t: any) => {
-      await RideRequest.update(
+    // IMMEDIATE + a conditional update: the passenger may be leaving the ride (CANCELLED_IN_TRANSIT)
+    // at this very moment. Whichever runs second finds the ride is no longer STARTED and stops, so the
+    // seat is released once and a finished ride is never overwritten.
+    await sequelize.transaction({ type: Transaction.TYPES.IMMEDIATE }, async (t: any) => {
+      const [changed] = await RideRequest.update(
         { status: 'COMPLETED' },
-        { where: { id: rideId }, transaction: t }
+        { where: { id: rideId, status: 'STARTED' }, transaction: t }
       );
+      if (changed === 0) throw new Error('NOT_STARTED');
 
-      // Free up the seats on the vehicle
+      // The passenger gets off at their destination: a checkpoint there, then their fare is settled by
+      // walking the checkpoints from where they boarded (segment pricing, see fareCalculator.ts).
+      await recordExit(ride, 'PASSENGER_DROPPED_OFF', ride.destinationZone, t);
+      const settled = await settleJourney(ride, t);
+      const finalFare = settled.bill?.fare ?? ride.estimatedFare;
+      // Collect the final fare: debit the wallet by exactly this amount, or record it as owed in cash.
+      await collectPayment(ride, finalFare, t);
+      await recordRideEvent(ride, 'COMPLETED', ride.status, { id: driverId, role: 'DRIVER' }, t, {
+        chargedFare: finalFare,
+        fullTripEstimate: settled.previousEstimate,
+      });
+
+      // Free up the seats on the vehicle, and re-estimate whoever is still on board (one fewer passenger)
       if (ride.vehicleId) {
         await Vehicle.update(
           { occupiedSeats: sequelize.literal(`MAX(0, occupiedSeats - ${ride.seatCount})`) },
           { where: { id: ride.vehicleId }, transaction: t }
         );
+        await recalculatePoolFares(ride.vehicleId, t);
       }
     });
 
-    res.json({ message: 'Ride completed.', rideId, status: 'COMPLETED' });
-  } catch (error) {
+    const final = await RideRequest.findByPk(rideId);
+    res.json({
+      message: 'Ride completed.',
+      rideId,
+      status: 'COMPLETED',
+      fare: final?.estimatedFare,
+      poolDiscount: final?.poolDiscount,
+      // Whether the payment succeeded (PAID / CASH_DUE / FAILED). The driver never sees wallet balances.
+      paymentMethod: final?.paymentMethod,
+      paymentStatus: final?.paymentStatus,
+    });
+  } catch (error: any) {
+    if (error.message === 'NOT_STARTED') {
+      res.status(409).json({ error: 'This ride is no longer in progress.' });
+      return;
+    }
     console.error('Complete ride error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -185,13 +227,12 @@ router.patch('/rides/:id/cancel', async (req: Request, res: Response) => {
     const err = validateTransition(ride.status as RideStatus, 'CANCELLED');
     if (err) { res.status(409).json({ error: err }); return; }
 
-    const { sequelize } = require('../models/index');
-
     await sequelize.transaction(async (t: any) => {
       await RideRequest.update(
         { status: 'CANCELLED' },
         { where: { id: rideId }, transaction: t }
       );
+      await recordRideEvent(ride, 'CANCELLED', ride.status, { id: driverId, role: 'DRIVER' }, t);
 
       // Release seats if the ride was already assigned to a vehicle
       if (ride.vehicleId) {
@@ -199,6 +240,9 @@ router.patch('/rides/:id/cancel', async (req: Request, res: Response) => {
           { occupiedSeats: sequelize.literal(`MAX(0, occupiedSeats - ${ride.seatCount})`) },
           { where: { id: ride.vehicleId }, transaction: t }
         );
+
+        // Someone left the pool: re-estimate everyone still in it (finished rides are never touched).
+        await recalculatePoolFares(ride.vehicleId, t);
       }
     });
 
@@ -235,15 +279,20 @@ router.get('/rides/active', async (req: Request, res: Response) => {
       destinationZone: r.destinationZone,
       seatCount: r.seatCount,
       status: r.status,
+      // Money is whole taka. estimatedFare is what this passenger pays (= what the driver earns from them).
       baseFare: r.baseFare,
       estimatedFare: r.estimatedFare,
-      estimatedFareBDT: (r.estimatedFare / 100).toFixed(2),
       poolDiscount: r.poolDiscount,
-      poolDiscountBDT: (r.poolDiscount / 100).toFixed(2),
+      fareFinal: isFareFinal(r.status),
+      paymentMethod: r.paymentMethod,
+      paymentStatus: r.paymentStatus,
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
     }));
 
+    // The driver's earnings for this ride: everything the passengers in the pool pay.
+    // 1 passenger → 100% of their base fare, 2 → 140%, 3 → 165% (see fareCalculator.ts).
+    const totalEarnings = activeRides.reduce((sum: number, r: any) => sum + r.estimatedFare, 0);
     const totalOccupied = activeRides.reduce((sum: number, r: any) => sum + r.seatCount, 0);
 
     // Get vehicle info for pool capacity display
@@ -257,7 +306,13 @@ router.get('/rides/active', async (req: Request, res: Response) => {
       availableSeats: vehicle.seatCapacity - vehicle.occupiedSeats,
     } : null;
 
-    res.json({ rides: summary, totalOccupiedSeats: totalOccupied, vehicle: vehicleInfo });
+    res.json({
+      rides: summary,
+      poolSize: activeRides.length,
+      totalEarnings,
+      totalOccupiedSeats: totalOccupied,
+      vehicle: vehicleInfo,
+    });
   } catch (error) {
     console.error('Get active rides error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -277,7 +332,7 @@ router.get('/rides/history', async (req: Request, res: Response) => {
     const history = await RideRequest.findAll({
       where: {
         driverId,
-        status: ['COMPLETED', 'CANCELLED'],
+        status: ['COMPLETED', 'CANCELLED', 'CANCELLED_IN_TRANSIT'],
       },
       order: [['updatedAt', 'DESC']],
     });
@@ -291,9 +346,11 @@ router.get('/rides/history', async (req: Request, res: Response) => {
         seatCount: r.seatCount,
         baseFare: r.baseFare,
         estimatedFare: r.estimatedFare,
-        estimatedFareBDT: (r.estimatedFare / 100).toFixed(2),
         poolDiscount: r.poolDiscount,
         status: r.status,
+        cancellationZone: r.cancellationZone ?? null,
+        paymentMethod: r.paymentMethod,
+        paymentStatus: r.paymentStatus,
         vehicleId: r.vehicleId,
         createdAt: r.createdAt,
         updatedAt: r.updatedAt,
@@ -323,12 +380,13 @@ router.get('/rides/pool', async (req: Request, res: Response) => {
     const poolRides: any[] = await RideRequest.findAll({
       where: {
         vehicleId: vehicle.id,
-        status: { [Op.notIn]: ['CANCELLED', 'COMPLETED'] },
+        status: { [Op.notIn]: [...TERMINAL_STATUSES] },
       },
       order: [['createdAt', 'ASC']],
     });
 
     const totalSeatsUsed = poolRides.reduce((s: number, r: any) => s + r.seatCount, 0);
+    const totalEarnings = poolRides.reduce((s: number, r: any) => s + r.estimatedFare, 0);
 
     res.json({
       vehicle: {
@@ -340,6 +398,7 @@ router.get('/rides/pool', async (req: Request, res: Response) => {
         availableSeats: vehicle.seatCapacity - vehicle.occupiedSeats,
       },
       poolSize: poolRides.length,
+      totalEarnings,
       totalSeatsUsed,
       passengers: poolRides.map((r: any) => ({
         rideId: r.id,
@@ -348,12 +407,64 @@ router.get('/rides/pool', async (req: Request, res: Response) => {
         destinationZone: r.destinationZone,
         seatCount: r.seatCount,
         status: r.status,
-        estimatedFareBDT: (r.estimatedFare / 100).toFixed(2),
-        poolDiscountBDT: (r.poolDiscount / 100).toFixed(2),
+        estimatedFare: r.estimatedFare,
+        poolDiscount: r.poolDiscount,
+        fareFinal: isFareFinal(r.status),
       })),
     });
   } catch (error) {
     console.error('Get pool error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /driver/rides/timeline   (driver login required)
+//
+// The lifecycle history of the rides this driver has carried, oldest first (the latest 200
+// events): who was requested, matched, arrived, started, completed or cancelled, and when.
+// `joinedMidTrip` marks a passenger matched while someone else was already travelling;
+// `ridersOnboard` is how many were travelling at that moment. Passengers appear by FIRST NAME only.
+// ---------------------------------------------------------------------------
+router.get('/rides/timeline', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (req.user!.role !== 'DRIVER') return res.status(403).json({ error: 'Only drivers can view this.' });
+    const driverId = req.user!.id;
+
+    const rides: any[] = await RideRequest.findAll({ where: { driverId }, attributes: ['id', 'passengerId'] });
+    if (rides.length === 0) return res.json({ events: [] });
+
+    const events: any[] = await RideEvent.findAll({
+      where: { rideRequestId: { [Op.in]: rides.map((r) => r.id) } },
+      order: [['id', 'DESC']],
+      limit: 200,
+    });
+    events.reverse();
+
+    const users: any[] = await User.findAll({
+      where: { id: [...new Set(rides.map((r) => r.passengerId))] },
+      attributes: ['id', 'name'],
+    });
+    const first = new Map(users.map((u) => [u.id, ((u.name ?? '').trim().split(/\s+/)[0]) ?? '']));
+
+    res.json({
+      events: events.map((e) => ({
+        id: e.id,
+        rideId: e.rideRequestId,
+        passengerFirstName: first.get(e.passengerId) ?? '',
+        status: e.status,
+        fromStatus: e.fromStatus,
+        at: e.createdAt,
+        poolSize: e.poolSize,
+        ridersOnboard: e.ridersOnboard,
+        joinedMidTrip: joinedMidTrip(e),
+        ...(e.status === 'CANCELLED_IN_TRANSIT' || e.status === 'COMPLETED'
+          ? { cancellationZone: e.cancellationZone, chargedFare: e.chargedFare, fullTripEstimate: e.fullTripEstimate }
+          : {}),
+      })),
+    });
+  } catch (error) {
+    console.error('Get ride timeline error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
