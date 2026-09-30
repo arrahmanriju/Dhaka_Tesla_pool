@@ -526,6 +526,32 @@ select.form-control option { background: var(--bg-surface); color: var(--text-pr
 .notice-card__title { font-size: 14px; font-weight: 700; color: var(--fg-warning); }
 .notice-card__desc { font-size: 13px; color: var(--text-secondary); margin-top: 2px; }
 
+/* ─── Ride status page ─────────────────────────────────────────────────────── */
+ol.status-timeline { list-style: none; }
+.status-timeline__item { display: flex; flex: 1; align-items: flex-start; }
+.info-banner {
+  background: rgba(99,102,241,0.1); border: 1px solid rgba(99,102,241,0.25);
+  border-radius: var(--radius-md); color: var(--fg-requested);
+  font-size: 13px; font-weight: 500; padding: var(--space-3) var(--space-4);
+  display: flex; align-items: center; justify-content: center; gap: var(--space-2); text-align: center;
+}
+.ride-status__message { margin-top: var(--space-2); font-size: 14px; font-weight: 600; text-align: center; }
+.ride-block {
+  margin-top: var(--space-4); padding: var(--space-4); border-radius: var(--radius-md);
+  background: var(--bg-surface); border: 1px solid var(--border-subtle);
+  display: flex; flex-direction: column; gap: var(--space-2);
+}
+.ride-block__title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }
+:lang(bn) .ride-block__title { text-transform: none; letter-spacing: 0; }
+.ride-block__line { font-size: 14px; }
+.driver-row { display: flex; align-items: center; gap: var(--space-4); flex-wrap: wrap; }
+.driver-row__info { flex: 1; min-width: 160px; display: flex; flex-direction: column; gap: 2px; }
+.driver-row__name { font-size: 16px; font-weight: 700; }
+.driver-row__vehicle { font-size: 14px; color: var(--text-secondary); }
+.driver-row__phone { font-size: 13px; color: var(--text-muted); }
+.avatar--sm { width: 56px; height: 56px; font-size: 24px; }
+.call-btn { text-decoration: none; }
+
 .fare-line { display: inline-flex; align-items: baseline; flex-wrap: wrap; gap: var(--space-1) var(--space-2); }
 .fare-line__amount--saved { color: var(--success); }
 .fare-line__note { font-size: 12px; color: var(--text-muted); }

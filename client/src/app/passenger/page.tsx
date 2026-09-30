@@ -2,16 +2,14 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { AppNav } from '@/components/AppNav';
-import { StatusBadge, StatusTimeline } from '@/components/StatusBadge';
+import { StatusBadge } from '@/components/StatusBadge';
+import { RideStatusCard } from '@/components/RideStatusCard';
 import { LoadingScreen, EmptyState, ErrorBanner, SuccessBanner, SeatCount, PassengerFare } from '@/components/UI';
 import { passengerApi, type FareEstimate, type Ride, type User, ApiError } from '@/lib/api';
 import { getUser } from '@/lib/auth';
 import { usePreferences } from '@/lib/preferences';
 
 type Tab = 'request' | 'active' | 'history';
-
-/** How often the active-ride tab re-reads the ride, so a fare change from a joiner/leaver shows up. */
-const FARE_REFRESH_MS = 10_000;
 
 export default function PassengerDashboard() {
   const router = useRouter();
@@ -65,9 +63,9 @@ export default function PassengerDashboard() {
           />
         )}
         {tab === 'active'   && (
-          <ActiveRidesTab passengerId={user.id} onNavigate={setTab} justRequested={justRequested} />
+          <ActiveRidesTab onNavigate={setTab} justRequested={justRequested} />
         )}
-        {tab === 'history'  && <HistoryTab      passengerId={user.id} />}
+        {tab === 'history'  && <HistoryTab />}
       </div>
     </div>
   );
@@ -105,7 +103,7 @@ function RequestRideTab({
     passengerApi.getRideOptions()
       .then((o) => { setZones(o.zones); setMaxSeats(o.maxSeats); })
       .catch(() => setError(t('p.req.zonesError')));
-    passengerApi.getActiveRides(user.id)
+    passengerApi.getActiveRides()
       .then((r) => setHasActiveRide(r.rides.length > 0))
       .catch(() => { /* the server enforces the rule either way */ });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -301,51 +299,45 @@ function RequestRideTab({
   );
 }
 
-// ─── Active Rides Tab ──────────────────────────────────────────────────────
+// ─── Active Rides Tab (the ride status page) ───────────────────────────────
 function ActiveRidesTab({
-  passengerId,
   onNavigate,
   justRequested,
 }: {
-  passengerId: string;
   onNavigate: (tab: Tab) => void;
   justRequested: boolean;
 }) {
   const { t } = usePreferences();
   const [rides, setRides] = useState<Ride[]>([]);
+  // Bumped on every reload so each ride card starts again from the fresh data.
+  const [version, setVersion] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [cancelling, setCancelling] = useState<string | null>(null);
   const [cancelSuccess, setCancelSuccess] = useState('');
 
-  // `silent` refreshes in the background: no spinner, and a failed refresh is ignored.
-  const load = useCallback(async (silent = false) => {
-    if (!silent) { setLoading(true); setError(''); }
+  const load = useCallback(async () => {
+    setLoading(true); setError('');
     try {
-      const res = await passengerApi.getActiveRides(passengerId);
+      const res = await passengerApi.getActiveRides();
       setRides(res.rides);
+      setVersion((v) => v + 1);
     } catch (err: any) {
-      if (!silent) setError(err.message);
+      setError(err.message);
     } finally {
-      if (!silent) setLoading(false);
+      setLoading(false);
     }
-  }, [passengerId]);
+  }, []);
 
   useEffect(() => { load(); }, [load]);
 
-  // The fare changes when someone joins or leaves the pool (until the trip starts), so keep it fresh.
-  useEffect(() => {
-    const timer = setInterval(() => { if (!document.hidden) load(true); }, FARE_REFRESH_MS);
-    return () => clearInterval(timer);
-  }, [load]);
-
+  // Each ride card keeps itself up to date (every 5 seconds) until the ride is completed or cancelled.
   const handleCancel = async (rideId: string) => {
     if (!confirm(t('p.active.confirmCancel'))) return;
-    setCancelling(rideId); setCancelSuccess('');
+    setCancelling(rideId); setCancelSuccess(''); setError('');
     try {
-      await passengerApi.cancelRide(rideId, passengerId);
+      await passengerApi.cancelRide(rideId);
       setCancelSuccess(t('p.active.cancelled'));
-      await load();
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -383,9 +375,9 @@ function ActiveRidesTab({
       ) : (
         <div className="ride-list">
           {rides.map((ride) => (
-            <ActiveRideCard
-              key={ride.id}
-              ride={ride}
+            <RideStatusCard
+              key={`${ride.id}-${version}`}
+              initial={ride}
               onCancel={handleCancel}
               cancelling={cancelling === ride.id}
             />
@@ -396,99 +388,19 @@ function ActiveRidesTab({
   );
 }
 
-function ActiveRideCard({
-  ride,
-  onCancel,
-  cancelling,
-}: {
-  ride: Ride;
-  onCancel: (id: string) => void;
-  cancelling: boolean;
-}) {
-  const { t, tp, tz, locale } = usePreferences();
-
-  return (
-    <div className="ride-card">
-      <div className="ride-card__route">
-        <span className="ride-card__zone">{tz(ride.pickupZone)}</span>
-        <span className="ride-card__arrow">→</span>
-        <span className="ride-card__zone">{tz(ride.destinationZone)}</span>
-        <StatusBadge status={ride.status} />
-        {ride.allowSharing === false && (
-          <span className="badge badge--matched" style={{ fontSize: 11, marginLeft: 6 }}>
-            {t('p.active.private')}
-          </span>
-        )}
-        {ride.isSharedRide && (
-          <span
-            className="badge badge--matched"
-            style={{ fontSize: 11, marginLeft: 6 }}
-            title={tp('p.active.sharedTitle', ride.coPassengers ?? 0)}
-          >
-            {tp('p.active.shared', ride.coPassengers ?? 0)}
-          </span>
-        )}
-      </div>
-
-      {/* Timeline */}
-      <StatusTimeline status={ride.status} />
-
-      <div className="ride-card__meta" style={{ marginTop: 16 }}>
-        <span className="ride-card__meta-item">
-          <SeatCount n={ride.seatCount} />
-        </span>
-
-        {/* Fare: this passenger's OWN fare only, e.g. "৳70 (shared, you save ৳30)" */}
-        <span className="ride-card__meta-item">
-          {t('common.fare')} <PassengerFare ride={ride} />
-        </span>
-
-        {/* Driver info */}
-        {ride.driverName && (
-          <span className="ride-card__meta-item">
-            👤 {t('p.active.driver')} <strong>{ride.driverName}</strong>
-          </span>
-        )}
-
-        {ride.vehicle && (
-          <span className="ride-card__meta-item">
-            🛺 <strong>{ride.vehicle.modelName}</strong> · {ride.vehicle.licensePlate}
-          </span>
-        )}
-      </div>
-
-      {ride.canCancel && (
-        <div className="ride-card__footer">
-          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-            {new Date(ride.createdAt).toLocaleTimeString(locale)}
-          </span>
-          <button
-            id={`cancel-ride-${ride.id}`}
-            className="btn btn--danger btn--sm"
-            onClick={() => onCancel(ride.id)}
-            disabled={cancelling}
-          >
-            {cancelling ? t('p.active.cancelling') : t('p.active.cancelRide')}
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ─── History Tab ───────────────────────────────────────────────────────────
-function HistoryTab({ passengerId }: { passengerId: string }) {
+function HistoryTab() {
   const { t, tz, locale } = usePreferences();
   const [rides, setRides] = useState<Ride[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    passengerApi.getHistory(passengerId)
+    passengerApi.getHistory()
       .then((res) => setRides(res.rides))
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [passengerId]);
+  }, []);
 
   if (loading) return <LoadingScreen label={t('loading.history')} />;
 

@@ -80,7 +80,7 @@ export function PassengerFare({ ride }: { ride: Ride }) {
       ) : open ? (
         <span className="fare-line__note">{t('fare.mayDrop')}</span>
       ) : null}
-      {ride.status === 'STARTED' && (
+      {(ride.fareLocked ?? (ride.status === 'STARTED' || ride.status === 'COMPLETED')) && (
         <span className="fare-line__lock" title={t('fare.lockedTitle')}>🔒 {t('fare.locked')}</span>
       )}
     </span>

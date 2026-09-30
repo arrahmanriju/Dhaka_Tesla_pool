@@ -121,6 +121,23 @@ export interface FareEstimate {
   tiers: FareTier[];
 }
 
+/** The driver of an accepted ride, as the passenger sees them. `phone` is only sent while the ride is in progress. */
+export interface RideDriver {
+  name: string | null;
+  phone: string | null;
+  photoUrl: string | null;
+  teslaId: string | null;
+}
+
+/** Who else is on the vehicle: first names only — never a phone number, fare or destination. */
+export interface RidePool {
+  isShared: boolean;
+  poolSize: number;
+  otherPassengers: { firstName: string }[];
+  seatsTaken: number;
+  seatCapacity: number;
+}
+
 export interface Ride {
   id: string;
   pickupZone: string;
@@ -148,7 +165,15 @@ export interface Ride {
     licensePlate: string;
     seatCapacity: number;
     occupiedSeats?: number;
+    /** The vehicle's nickname, e.g. "Bullet" */
+    nickname?: string;
+    /** The driver's Tesla ID, e.g. "DTP-0001" */
+    teslaId?: string;
   } | null;
+  /** Set once a driver has accepted; null while the ride is still REQUESTED */
+  driver?: RideDriver | null;
+  /** Set while the ride is open and on a vehicle; null before it is matched and once it is over */
+  pool?: RidePool | null;
   driverId?: string;
   vehicleId?: string;
   /** Driver's display name — shown to passenger only when matched */
@@ -226,20 +251,17 @@ export const passengerApi = {
       body: JSON.stringify(input),
     }).then(res => ({ ride: res.rideRequest })),
 
-  getActiveRides: (passengerId: string) =>
-    request<{ rides: Ride[] }>(`/passenger/rides/active?passengerId=${passengerId}`),
+  // The passenger is identified by the login token: these routes only ever return, or act on,
+  // the logged-in passenger's own rides (403 for anyone else's).
+  getActiveRides: () => request<{ rides: Ride[] }>('/passenger/rides/active'),
 
-  getRide: (rideId: string, passengerId: string) =>
-    request<{ ride: Ride }>(`/passenger/rides/${rideId}?passengerId=${passengerId}`),
+  /** One ride by id — the ride status page polls this every 5 seconds until the ride is finished. */
+  getRide: (rideId: string) => request<{ ride: Ride }>(`/passenger/rides/${rideId}`),
 
-  getHistory: (passengerId: string) =>
-    request<{ rides: Ride[] }>(`/passenger/rides/history?passengerId=${passengerId}`),
+  getHistory: () => request<{ rides: Ride[] }>('/passenger/rides/history'),
 
-  cancelRide: (rideId: string, passengerId: string) =>
-    request<{ message: string; status: string }>(`/passenger/rides/${rideId}/cancel`, {
-      method: 'PATCH',
-      body: JSON.stringify({ passengerId }),
-    }),
+  cancelRide: (rideId: string) =>
+    request<{ message: string; status: string }>(`/passenger/rides/${rideId}/cancel`, { method: 'PATCH' }),
 };
 
 // ─── Driver APIs ─────────────────────────────────────────────────────────────
