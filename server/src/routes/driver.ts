@@ -1,8 +1,9 @@
 import { Router, Request, Response } from 'express';
 import { Op } from 'sequelize';
-import { User, Vehicle, RideRequest, DriverProfile } from '../models';
+import { sequelize, User, Vehicle, RideRequest, DriverProfile } from '../models';
 import { validateTransition, RideStatus } from '../models/RideRequest';
 import { isFareLocked, recalculatePoolFares } from '../utils/poolFares';
+import { recordRideEvent } from '../utils/rideEvents';
 
 const router = Router();
 
@@ -98,10 +99,10 @@ async function advanceRide(
     return;
   }
 
-  await RideRequest.update(
-    { status: targetStatus },
-    { where: { id: rideId } }
-  );
+  await sequelize.transaction(async (t: any) => {
+    await RideRequest.update({ status: targetStatus }, { where: { id: rideId }, transaction: t });
+    await recordRideEvent(ride, targetStatus, ride.status, { id: driverId, role: 'DRIVER' }, t);
+  });
 
   res.json({ message: `Ride status updated to ${targetStatus}.`, rideId, status: targetStatus });
 }
@@ -142,13 +143,12 @@ router.patch('/rides/:id/complete', async (req: Request, res: Response) => {
     const err = validateTransition(ride.status as RideStatus, 'COMPLETED');
     if (err) { res.status(409).json({ error: err }); return; }
 
-    const { sequelize } = require('../models/index');
-
     await sequelize.transaction(async (t: any) => {
       await RideRequest.update(
         { status: 'COMPLETED' },
         { where: { id: rideId }, transaction: t }
       );
+      await recordRideEvent(ride, 'COMPLETED', ride.status, { id: driverId, role: 'DRIVER' }, t);
 
       // Free up the seats on the vehicle
       if (ride.vehicleId) {
@@ -186,13 +186,12 @@ router.patch('/rides/:id/cancel', async (req: Request, res: Response) => {
     const err = validateTransition(ride.status as RideStatus, 'CANCELLED');
     if (err) { res.status(409).json({ error: err }); return; }
 
-    const { sequelize } = require('../models/index');
-
     await sequelize.transaction(async (t: any) => {
       await RideRequest.update(
         { status: 'CANCELLED' },
         { where: { id: rideId }, transaction: t }
       );
+      await recordRideEvent(ride, 'CANCELLED', ride.status, { id: driverId, role: 'DRIVER' }, t);
 
       // Release seats if the ride was already assigned to a vehicle
       if (ride.vehicleId) {

@@ -11,6 +11,7 @@ import {
 import { calculateBaseFare, estimateFare, shareRatePercent } from '../utils/fareCalculator';
 import { isFareLocked, recalculatePoolFares } from '../utils/poolFares';
 import { checkPoolJoin, PoolVerdict } from '../utils/pooling';
+import { recordRideEvent } from '../utils/rideEvents';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 
 const router = Router();
@@ -183,7 +184,7 @@ router.post('/', authenticateToken, async (req: AuthenticatedRequest, res: Respo
       });
       if (existing) throw new Error('ACTIVE_RIDE_EXISTS');
 
-      return RideRequest.create(
+      const created = await RideRequest.create(
         {
           passengerId: passenger.id,
           pickupZone,
@@ -197,6 +198,8 @@ router.post('/', authenticateToken, async (req: AuthenticatedRequest, res: Respo
         },
         { transaction: t }
       );
+      await recordRideEvent(created, 'REQUESTED', null, { id: passenger.id, role: 'PASSENGER' }, t);
+      return created;
     });
 
     res.status(201).json({ rideRequest: formatRide(rideRequest) });
@@ -389,6 +392,9 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
       // started is re-priced from their own base fare (70% each for 2 passengers, 55% for 3);
       // rides that have already STARTED keep their locked fare.
       await recalculatePoolFares(vehicle.id, t);
+
+      // ── STEP 5: History. `ridersOnboard` > 0 on this event means the passenger joined mid-trip. ──
+      await recordRideEvent({ ...candidate.toJSON(), vehicleId: vehicle.id }, 'MATCHED', 'REQUESTED', { id: driverId, role: 'DRIVER' }, t);
     });
 
     // Return the updated ride so the caller can see the new fare

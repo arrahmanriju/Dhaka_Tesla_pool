@@ -1,10 +1,11 @@
 import { Router, Response, NextFunction } from 'express';
 import { Op } from 'sequelize';
-import { User, RideRequest, Vehicle, DriverProfile } from '../models';
+import { sequelize, User, RideRequest, Vehicle, DriverProfile } from '../models';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 import { validateTransition, RideStatus } from '../models/RideRequest';
 import { isFareLocked, recalculatePoolFares } from '../utils/poolFares';
 import { shareRatePercent } from '../utils/fareCalculator';
+import { recordRideEvent } from '../utils/rideEvents';
 
 const router = Router();
 
@@ -333,14 +334,13 @@ router.patch('/rides/:id/cancel', ownPassenger, async (req: AuthenticatedRequest
       return;
     }
 
-    const { sequelize } = require('../models/index');
-
     await sequelize.transaction(async (t: any) => {
       // 1. Mark this ride cancelled
       await RideRequest.update(
         { status: 'CANCELLED' },
         { where: { id: rideId, passengerId }, transaction: t }
       );
+      await recordRideEvent(ride, 'CANCELLED', ride.status, { id: passengerId, role: 'PASSENGER' }, t);
 
       if (ride.vehicleId) {
         // 2. Release the reserved seats
