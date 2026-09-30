@@ -145,6 +145,9 @@ export class RideRequest extends Model {
   public readonly updatedAt!: Date;
 }
 
+/** Why an attempt to change `allowSharing` is refused (see the hooks in initRideRequest). */
+export const ALLOW_SHARING_FIXED = 'allowSharing is fixed when the ride is requested and cannot be changed afterwards.';
+
 export const initRideRequest = (sequelize: any) => {
   RideRequest.init(
     {
@@ -237,6 +240,16 @@ export const initRideRequest = (sequelize: any) => {
     {
       sequelize,
       tableName: 'RideRequests',
+      hooks: {
+        // `allowSharing` is decided once, when the ride is requested, and is fixed for its lifetime: a matched
+        // or started ride can never be switched between private and shared, by any route or any direct update.
+        beforeUpdate: (ride: any) => {
+          if (ride.changed('allowSharing')) throw new Error(ALLOW_SHARING_FIXED);
+        },
+        beforeBulkUpdate: (options: any) => {
+          if (options.attributes && 'allowSharing' in options.attributes) throw new Error(ALLOW_SHARING_FIXED);
+        },
+      },
     }
   );
 };

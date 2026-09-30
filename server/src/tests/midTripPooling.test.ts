@@ -193,10 +193,11 @@ describe('Mid-trip pooling — Jashim (Bullet, 3 seats), Nusrat, Rafiq, Shirin',
       await nusratIsTravelling();
       const priv = await requestRide(rafiq, { ...MOHAKHALI_TO_BADDA, allowSharing: false });
       expect((await accept(priv.body.rideRequest.id)).status).toBe(409);
-      await RideRequest.update({ status: 'CANCELLED' }, { where: { id: priv.body.rideRequest.id } });
+    });
 
-      // ...and a started private ride refuses a sharing passenger on the same road
-      await RideRequest.update({ allowSharing: false }, { where: { passengerId: nusrat.id } });
+    it('a started private ride takes nobody, even on the same road (privateRides.test.ts has the full set)', async () => {
+      // Nusrat requested this ride as private from the start (allowSharing is fixed when it is requested)
+      await nusratIsTravelling({ ...MOHAKHALI_TO_BADDA, allowSharing: false } as Trip);
       const sharer = await requestRide(shirin, MOHAKHALI_TO_BADDA);
       const res = await accept(sharer.body.rideRequest.id);
       expect(res.status).toBe(409);

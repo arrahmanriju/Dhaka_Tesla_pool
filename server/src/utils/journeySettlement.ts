@@ -17,7 +17,7 @@ import { SegmentFare } from './fareCalculator';
  * before this journey ended, kept in the history so the difference is visible.
  */
 export async function settleJourney(
-  ride: { id: string; destinationZone: string; seatCount: number; allowSharing: boolean; estimatedFare: number },
+  ride: { id: string; destinationZone: string; seatCount: number; allowSharing: boolean; estimatedFare: number; baseFare?: number },
   transaction: Transaction | null = null
 ): Promise<{ bill: (SegmentFare & { zones: string[] }) | null; previousEstimate: number }> {
   const previousEstimate = ride.estimatedFare;

@@ -390,6 +390,10 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
         throw new Error('CAPACITY_EXCEEDED');
       }
 
+      // (A PRIVATE ride only got this far on an empty vehicle: checkPoolJoin refuses it anywhere else, so
+      // there is no pooling, route or multi-passenger logic for it. The seat claim above is its baseline
+      // capacity check: the vehicle must have room for the seats it asked for.)
+
       // ── STEP 3: Atomically transition the ride to MATCHED ───────────────
       // WHERE status='REQUESTED' prevents double-acceptance by two drivers.
       const [reqUpdatedCount] = await RideRequest.update(

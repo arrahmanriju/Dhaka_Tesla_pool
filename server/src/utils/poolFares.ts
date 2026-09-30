@@ -40,6 +40,11 @@ export async function recalculatePoolFares(vehicleId: string, transaction: Trans
 
     let fare: number;
     let poolDiscount: number;
+    if (!ride.allowSharing) {
+      // A private ride is never pooled: always the flat price of its route, however many rides share the vehicle record
+      await RideRequest.update({ baseFare, estimatedFare: baseFare, poolDiscount: 0 }, { where: { id: ride.id }, transaction });
+      continue;
+    }
     const journey = ride.status === 'STARTED' ? await priceJourney(ride, transaction) : null;
     if (journey) {
       fare = journey.fare;
