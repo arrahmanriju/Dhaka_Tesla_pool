@@ -25,15 +25,21 @@ async function request<T>(
   options: RequestInit = {}
 ): Promise<T> {
   const token = getToken();
-  const res = await fetch(`${BASE}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      // Endpoints that hold private data (driver onboarding) identify the caller by this token.
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(options.headers || {}),
-    },
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        // Endpoints that hold private data (driver onboarding) identify the caller by this token.
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(options.headers || {}),
+      },
+    });
+  } catch {
+    // Offline, server down or blocked: status 0 means "never got an answer" (see lib/errors.ts).
+    throw new ApiError(0, 'Network error', 'NETWORK');
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     // A 401 from /auth/* is just "wrong credentials" — show it on the form instead of reloading.

@@ -51,7 +51,7 @@ export function MidTripOffers({ driverId, onJoined }: { driverId: string; onJoin
       }
       await poll();
     } catch (err) {
-      setError(formatError(err as { status?: number; message: string }));
+      setError(formatError(err));
       await poll(); // the list may have changed under us (seat taken, request cancelled)
     } finally {
       setBusy(null);

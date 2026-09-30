@@ -37,6 +37,27 @@ export function EmptyState({
   );
 }
 
+/**
+ * What a page shows when its data could NOT be loaded. Used instead of the empty state: "no rides yet"
+ * would be wrong when the truth is "we could not check". Always explains what happened in plain words
+ * and offers a way to try again.
+ */
+export function ErrorState({ message, onRetry }: { message: string; onRetry?: () => void }) {
+  const { t } = usePreferences();
+  return (
+    <div className="empty-state" role="alert" id="load-error">
+      <div className="empty-state__icon">⚠️</div>
+      <p className="empty-state__title">{t('err.loadTitle')}</p>
+      <p className="empty-state__desc">{message}</p>
+      {onRetry && (
+        <button className="btn btn--primary" onClick={onRetry} id="load-error-retry">
+          {t('err.retry')}
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function ErrorBanner({ message }: { message: string }) {
   return (
     <div className="error-banner">
