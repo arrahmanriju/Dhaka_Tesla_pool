@@ -12,17 +12,17 @@
  *   Nusrat and Rafiq both ride Uttara → Dhanmondi. tripCost 100 + 16 × 20 = ৳420; pooled for the whole
  *   trip they are each quoted 420 / 2 + 20 = ৳230. Both board at Uttara. Rafiq leaves at Mirpur.
  *   Rafiq pays 230 / 2 = ৳115.
- *   Nusrat: Uttara → Mirpur with 2 on board: 9/16 × 420 = 236.25, / 2 = 118.125, + 20 = 138.125;
- *           Mirpur → Dhanmondi alone: 7/16 × 420 = 183.75.  Exact total 321.875 → ৳322.
- *   The driver earns 115 + 322 = ৳437 (the two were quoted ৳460 together).
+ *   Nusrat: Uttara → Mirpur with 2 on board: 9/16 × 420 = 236.25, / 2 = 118.125 → rounded UP to 119, + 20 = 139;
+ *           Mirpur → Dhanmondi alone: 7/16 × 420 = 183.75 → ৳184.  Fare 139 + 184 = ৳323.
+ *   The driver earns 115 + 323 = ৳438 (the two were quoted ৳460 together).
  * (The same rule on a route with an exact midpoint is worked in cancellationPricing.test.ts: 85 / 245 / 330.)
  *
  * Second scenario, used below: Nusrat rides Uttara → Dhanmondi and starts alone (quoted ৳420); Rafiq
  * boards at Mirpur going to Dhanmondi (quoted 240 / 2 + 20 = ৳140); Nusrat asks to be dropped at Mohammadpur.
  *   Nusrat pays 420 / 2 = ৳210 (she was on track for ৳348 to Dhanmondi).
  *   Rafiq, dropped at Dhanmondi, is priced by the walk: journeyKm 5 + 3 = 8, tripCost ৳260;
- *           Mirpur → Mohammadpur, 2 on board: 162.5 / 2 + 20 = 101.25; Mohammadpur → Dhanmondi alone: 97.5.
- *           Exact total 198.75 → ৳199.
+ *           Mirpur → Mohammadpur, 2 on board: 162.5 / 2 = 81.25 → rounded UP to 82, + 20 = 102;
+ *           Mohammadpur → Dhanmondi alone: 97.5 → ৳98.  Fare 102 + 98 = ৳200.
  */
 import request from 'supertest';
 import { app } from '../index';
@@ -106,7 +106,7 @@ describe('Mid-trip cancellation — CANCELLED_IN_TRANSIT pays half of the quoted
 
   // ─────────────────────────── the fare ───────────────────────────
   describe('the leaving passenger pays half of the fare they were quoted; everyone else is priced as usual', () => {
-    it('worked example: both pooled at ৳230, Rafiq leaves at Mirpur and pays ৳115; Nusrat pays ৳322; the driver earns ৳437', async () => {
+    it('worked example: both pooled at ৳230, Rafiq leaves at Mirpur and pays ৳115; Nusrat pays ৳323; the driver earns ৳438', async () => {
       const nusratRide = await joinPool(nusrat);
       const rafiqRide = await joinPool(rafiq);
       expect((await ride(nusratRide)).estimatedFare).toBe(230); // 420 / 2 + 20, quoted for the whole trip
@@ -125,16 +125,16 @@ describe('Mid-trip cancellation — CANCELLED_IN_TRANSIT pays half of the quoted
         ['Mirpur', 1, 'PASSENGER_LEFT'], // still a checkpoint: the count on board drops
       ]);
 
-      // Nusrat rides on alone and is priced by the walk over her real checkpoints: 138.125 + 183.75 = 321.875
+      // Nusrat rides on alone and is priced by the walk over her real checkpoints: 118.125 → 119, + 20 = 139, then 183.75 → 184
       expect((await driverAction(nusratRide, 'complete')).status).toBe(200);
       const bill = (await view(nusratRide, nusrat)).body.ride.fareBreakdown;
       expect(bill.segments).toEqual([
         { distanceKm: 0, passengers: 1, driverBonus: 0, charge: 0 },
-        { distanceKm: 9, passengers: 2, driverBonus: 20, charge: 138 }, // 138.125
-        { distanceKm: 7, passengers: 1, driverBonus: 0, charge: 184 }, // 183.75: 321.875 rounds to 322 = 138 + 184
+        { distanceKm: 9, passengers: 2, driverBonus: 20, charge: 139 }, // 118.125 rounded up to 119, + 20
+        { distanceKm: 7, passengers: 1, driverBonus: 0, charge: 184 }, // alone: 183.75 → 184
       ]);
-      expect(await ride(nusratRide)).toMatchObject({ status: 'COMPLETED', estimatedFare: 322 });
-      expect((await ride(rafiqRide)).estimatedFare + (await ride(nusratRide)).estimatedFare).toBe(437);
+      expect(await ride(nusratRide)).toMatchObject({ status: 'COMPLETED', estimatedFare: 323 });
+      expect((await ride(rafiqRide)).estimatedFare + (await ride(nusratRide)).estimatedFare).toBe(438);
     });
 
     it('a passenger who boarded alone is quoted the solo fare: Nusrat leaves at Mohammadpur and pays ৳210, not the ৳348 she was on track for', async () => {
@@ -170,21 +170,21 @@ describe('Mid-trip cancellation — CANCELLED_IN_TRANSIT pays half of the quoted
       expect(late.body.fare.fare).toBe(210);
     });
 
-    it('the passengers who stay are priced only by the segment walk: Rafiq pays ৳199, as if nobody had a special rule', async () => {
+    it('the passengers who stay are priced only by the segment walk: Rafiq pays ৳200, as if nobody had a special rule', async () => {
       const { nusratRide, rafiqRide } = await nusratThenRafiq();
       await leave(nusratRide, nusrat, 'Mohammadpur');
       expect((await driverAction(rafiqRide, 'complete')).status).toBe(200);
 
       const final = await ride(rafiqRide);
-      expect(final).toMatchObject({ status: 'COMPLETED', estimatedFare: 199 });
+      expect(final).toMatchObject({ status: 'COMPLETED', estimatedFare: 200 });
       const bill = (await view(rafiqRide, rafiq)).body.ride.fareBreakdown;
       expect(bill.segments).toEqual([
-        { distanceKm: 5, passengers: 2, driverBonus: 20, charge: 101 }, // 101.25
-        { distanceKm: 3, passengers: 1, driverBonus: 0, charge: 98 }, // 97.5: the total 198.75 rounds to 199 = 101 + 98
+        { distanceKm: 5, passengers: 2, driverBonus: 20, charge: 102 }, // 162.5 / 2 = 81.25 rounded up to 82, + 20
+        { distanceKm: 3, passengers: 1, driverBonus: 0, charge: 98 }, // alone: 97.5 → 98
       ]);
-      expect(bill).toMatchObject({ final: true, fare: 199 });
-      // what the driver earns from the two of them: ৳210 + ৳199
-      expect((await ride(nusratRide)).estimatedFare + final.estimatedFare).toBe(409);
+      expect(bill).toMatchObject({ final: true, fare: 200 });
+      // what the driver earns from the two of them: ৳210 + ৳200
+      expect((await ride(nusratRide)).estimatedFare + final.estimatedFare).toBe(410);
     });
 
     it('a passenger riding alone who leaves pays half of the solo fare', async () => {
@@ -212,10 +212,10 @@ describe('Mid-trip cancellation — CANCELLED_IN_TRANSIT pays half of the quoted
       // Rafiq, on board with Nusrat: Mirpur → Dhanmondi with 2 on board: tripCost 240 / 2 + 20 = ৳140
       expect((await ride(rafiqRide)).estimatedFare).toBe(140);
       await leave(nusratRide, nusrat, 'Mohammadpur');
-      // Now he is alone from Mohammadpur: 101.25 (Mirpur → Mohammadpur, shared) + 97.5 (alone) = 198.75 → ৳199 if he rides on to Dhanmondi
+      // Now he is alone from Mohammadpur: 102 (Mirpur → Mohammadpur, shared: 81.25 up to 82, + 20) + 98 (97.5 alone) = ৳200 if he rides on to Dhanmondi
       const r = await ride(rafiqRide);
       expect(r.status).toBe('STARTED');
-      expect(r.estimatedFare).toBe(199);
+      expect(r.estimatedFare).toBe(200);
       expect(r.quotedFare).toBe(140); // his own quote is frozen: it is only used if HE leaves
     });
 
@@ -411,15 +411,15 @@ describe('Mid-trip cancellation — CANCELLED_IN_TRANSIT pays half of the quoted
 
       // Nusrat leaves at Mohammadpur: she was quoted ৳420 alone when she boarded, so she pays 420 / 2 = ৳210.
       // Rafiq and Shirin are priced by the walk. journeyKm 5 + 3 = 8, tripCost 260. Mirpur → Mohammadpur, 3 on board:
-      //         162.5 / 3 + 20 = 74.17; Mohammadpur → Dhanmondi, 2 left: 97.5 / 2 + 20 = 68.75. Exact total 142.92 → ৳143 each.
+      //         162.5 / 3 = 54.17 rounded UP to 55, + 20 = 75; Mohammadpur → Dhanmondi, 2 left: 97.5 / 2 = 48.75 rounded UP to 49, + 20 = 69. Fare ৳144 each.
       const fares = await Promise.all(rides.map(async (id) => (await ride(id)).estimatedFare));
-      expect(fares).toEqual([210, 143, 143]);
+      expect(fares).toEqual([210, 144, 144]);
 
       // the stayers' bills add up to their fares: nothing dropped, nothing double-counted. The leaver's has no stretches.
       expect(bills[0].segments).toEqual([]);
       [1, 2].forEach((i) => expect(bills[i].segments.reduce((sum: number, x: any) => sum + x.charge, 0)).toBe(fares[i]));
       // what the driver earns for the whole run
-      expect(fares.reduce((a, b) => a + b, 0)).toBe(496);
+      expect(fares.reduce((a, b) => a + b, 0)).toBe(498);
     });
   });
 });

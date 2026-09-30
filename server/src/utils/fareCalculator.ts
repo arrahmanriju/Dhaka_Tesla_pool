@@ -73,8 +73,8 @@ export function calculateBaseFare(pickup: string, dropoff: string, seatCount: nu
 //                       (journeyKm = the sum of the segment distances, so the pieces add up to the whole
 //                        trip cost: 100 + 20 × journeyKm × seats)
 //   n = 1  →  segmentFare = tripCost(segment)                 riding alone: the full cost, nothing changes
-//   n ≥ 2  →  segmentFare = tripCost(segment) / n + ৳20       an even split, THEN a flat ৳20 driver bonus
-//                                                              for each passenger sharing the segment
+//   n ≥ 2  →  segmentFare = ceil(tripCost(segment) / n) + ৳20  an even split, rounded UP, THEN a flat ৳20
+//                                                              driver bonus for each passenger sharing the segment
 //
 //   fare = Σ segmentFare over the segments the passenger was on board for
 //
@@ -83,13 +83,21 @@ export function calculateBaseFare(pickup: string, dropoff: string, seatCount: nu
 // zone earns none). A private ride (allowSharing = false) is always priced as n = 1.
 //
 // ROUNDING RULE (whole taka, exact, reproducible by hand)
-//   tripCost / n is rarely a whole number, so the fare is rounded to the NEAREST WHOLE TAKA, HALVES UP,
-//   applied to the RUNNING TOTAL rather than to each piece:
-//       segment charge = round(total up to the end of this segment) − round(total up to its start)
-//   So every segment charge is a whole number of taka, the charges add up EXACTLY to the fare, and the
-//   fare is the exact total rounded once. (Rounding each segment separately could drift by a taka per
-//   segment, and a passenger who rode alone would no longer pay exactly their trip cost.) The ৳20 bonus
-//   is a whole number, so only the split part is ever rounded. All arithmetic is on integers.
+//   Money here is whole taka (never paisa). tripCost / n is rarely a whole number (260 / 3 = 86.67), so
+//   a SHARED split is ROUNDED UP to the next whole taka, for EVERY passenger sharing that segment:
+//       segmentFare (n ≥ 2) = ceil(tripCost / n) + ৳20         260 / 3 → 87, + 20 = ৳107 for each of the three
+//   Everyone on the segment pays the same rounded-up amount (never "some pay 87 and one pays 86"), so the
+//   n of them together pay a little more than tripCost + 20n: the extra fraction (here 3 × 87 = 261 against
+//   260) is kept by the driver as additional profit. This is the ONLY place a segment cost is split, and
+//   the only place a fraction of a taka can appear on a shared segment. (calculateSplit below.)
+//
+//   A SOLO segment is not split, so nothing is rounded up. But when the ৳100 base is spread over a
+//   journey by distance, one solo segment's share can itself be a fraction, so the solo segments of a
+//   journey are rounded together (nearest whole taka, halves up, on their running total). That keeps a
+//   passenger who rides alone the whole way at exactly their trip cost however the journey is cut.
+//
+//   Every segment charge is a whole number, the fare is their sum, and it is computed with integer
+//   arithmetic only, so there is no floating-point drift anywhere.
 //
 // The passenger's own exit is a checkpoint like any other, and a mid-trip cancellation at a zone they
 // name is one too: it lowers the count on board for everyone after it, so the people who stay are priced
@@ -103,6 +111,8 @@ export function calculateBaseFare(pickup: string, dropoff: string, seatCount: nu
 //   alone              ৳300
 //   2 on board         300 / 2 + 20 = 150 + 20 = ৳170 each
 //   3 on board         300 / 3 + 20 = 100 + 20 = ৳120 each
+// and a segment that does not divide evenly: tripCost 260 shared by 3 is 86.67, rounded UP to 87,
+// + 20 = ৳107 each (three of them pay ৳321 for a segment that cost ৳260 + 60; the driver keeps the ৳1).
 // ---------------------------------------------------------------------------
 
 /** Distance for one segment: 0 within a zone, otherwise the table distance. */
@@ -140,8 +150,33 @@ export interface SegmentFare {
   poolDiscount: number;
 }
 
-const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
-const lcm = (a: number, b: number): number => (a / gcd(a, b)) * b;
+/** ceil(numerator / denominator) for positive integers, in integer arithmetic. */
+const ceilDiv = (numerator: number, denominator: number): number => Math.floor((numerator + denominator - 1) / denominator);
+
+/**
+ * THE SPLIT: what one passenger pays for a segment shared by n ≥ 2 passengers.
+ *
+ *   calculateSplit(tripCostNumerator, tripCostDenominator, n) = ceil(tripCost / n) + ৳20
+ *
+ * where tripCost = numerator / denominator (a segment's share of the trip cost can be a fraction). The
+ * division is ROUNDED UP to the next whole taka, the same for every one of the n passengers, and the
+ * driver keeps the difference (see the rounding rule above). Integer arithmetic only.
+ */
+export function calculateSplit(tripCostNumerator: number, tripCostDenominator: number, n: number): number {
+  if (!Number.isSafeInteger(tripCostNumerator) || !Number.isSafeInteger(tripCostDenominator * n) || tripCostNumerator < 0 || tripCostDenominator < 1 || n < 2) {
+    throw new Error('A split needs whole-taka amounts and at least two passengers');
+  }
+  return ceilDiv(tripCostNumerator, tripCostDenominator * n) + DRIVER_BONUS_BDT;
+}
+
+/**
+ * What one passenger pays for a segment whose whole-taka trip cost is `tripCost`, with `activeCount` on board:
+ * the trip cost alone when solo, otherwise the rounded-up split plus the ৳20 bonus.
+ *   segmentFareFor(40, 1)  = 40         segmentFareFor(260, 2) = 150         segmentFareFor(260, 3) = 87 + 20 = 107
+ */
+export function segmentFareFor(tripCost: number, activeCount: number): number {
+  return activeCount <= 1 ? tripCost : calculateSplit(tripCost, 1, activeCount);
+}
 
 /**
  * Prices a journey from its checkpoints.
@@ -183,25 +218,25 @@ export function segmentFare(input: {
     };
   }
 
-  // Exact arithmetic in units of 1/D, with D = journeyKm × lcm(passenger counts), so nothing is a fraction:
-  //   tripCost(segment) / n  =  segKm × soloFare × (L / n)  units
-  const L = raw.reduce((l, s) => (s.distanceKm > 0 ? lcm(l, s.passengers) : l), 1);
-  const D = journeyKm * L;
-  const roundHalfUp = (units: number) => Math.floor((2 * units + D) / (2 * D)); // units / D, nearest, halves up
-
-  let cumulative = 0;
-  let roundedBefore = 0;
+  // A segment's trip cost is segKm / journeyKm of soloFare: the fraction (segKm × soloFare) / journeyKm.
+  let soloUnits = 0; // running total of the solo segments' exact amounts, in units of 1/journeyKm
+  let soloRoundedBefore = 0;
   const segments: FareSegment[] = raw.map((s) => {
-    const driverBonus = s.passengers >= 2 && s.distanceKm > 0 ? DRIVER_BONUS_BDT : 0;
-    cumulative += s.distanceKm * soloFare * (L / s.passengers) + driverBonus * D;
-    const roundedTotal = roundHalfUp(cumulative);
-    const charge = roundedTotal - roundedBefore;
-    roundedBefore = roundedTotal;
-    return { ...s, driverBonus, charge };
+    if (s.distanceKm === 0) return { ...s, driverBonus: 0, charge: 0 };
+    if (s.passengers === 1) {
+      // Alone: not split. The solo segments are rounded together (nearest taka, halves up, running total).
+      soloUnits += s.distanceKm * soloFare;
+      const rounded = Math.floor((2 * soloUnits + journeyKm) / (2 * journeyKm));
+      const charge = rounded - soloRoundedBefore;
+      soloRoundedBefore = rounded;
+      return { ...s, driverBonus: 0, charge };
+    }
+    // Shared: split n ways, ROUNDED UP for every passenger on the segment, plus the driver bonus.
+    return { ...s, driverBonus: DRIVER_BONUS_BDT, charge: calculateSplit(s.distanceKm * soloFare, journeyKm, s.passengers) };
   });
 
-  if (!Number.isSafeInteger(2 * cumulative + D)) throw new Error('Fare arithmetic overflow');
-  const fare = roundedBefore;
+  const fare = segments.reduce((sum, s) => sum + s.charge, 0);
+  if (!Number.isSafeInteger(fare)) throw new Error('Fare arithmetic overflow');
   return { segments, soloFare, fare, poolDiscount: Math.max(0, soloFare - fare) };
 }
 
