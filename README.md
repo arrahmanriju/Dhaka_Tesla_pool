@@ -106,7 +106,7 @@ The last row is not in the original list of events, but a drop-off changes who i
 - **`n ≥ 2`**: `segmentFare = ceil(tripCost of the segment / n) + ৳20`. The cost is split evenly and **rounded up to the next whole taka** (see the rounding rule), **then** a flat ৳20 driver bonus is added per passenger, the same for everybody sharing that segment (per passenger, not per seat; a 0 km hop earns none).
 - **`fare = Σ segmentFare`** over the segments they were on board for.
 - `poolDiscount = soloFare − fare` (never below 0), where `soloFare` is the whole journey's tripCost: what pooling saved on the stretches they travelled.
-- A private ride (sharing off) is always priced as `n = 1`.
+- A private ride (sharing off) skips all of this: it is always the flat `tripCost` of its route (see *Private rides*).
 
 **Rounding rule — a shared split is rounded UP, for everybody on the segment.** Money is whole taka (integers, never paisa), and `tripCost / n` is often not a whole number (260 / 3 = 86.67). When it isn't, the split is **rounded up to the next whole taka, and every passenger sharing that segment pays that same rounded-up amount** (never "two pay 86 and one pays 87"), plus the ৳20 bonus: `ceil(tripCost / n) + 20`. The few extra fractions of a taka that this adds up to are **kept by the driver as additional profit**. It is applied in one place, the split calculation in `fareCalculator.ts` (`calculateSplit`), which every fare goes through: the quote before a ride, the running estimate, a completed ride's walk, and the stayers after a cancellation. It uses integer arithmetic only, so a fare is always a whole number and nothing can drift.
 
@@ -202,7 +202,7 @@ Because the distances in the zone table are not additive, a passenger who stays 
 - `baseFare` stays the passenger's own **solo fare for the whole route** (`100 + distanceKm × 20 × seats`), set at request time; `poolDiscount` is what pooling saved (`baseFare − estimate` before the journey ends, `soloFare − fare` on the stretches travelled after it).
 - **A cancellation mid-route changes the stayer's journey.** The checkpoint at the cancellation zone cuts the remaining passenger's journey there, and a route through a zone can be longer than the direct one, so their journey is priced over that longer distance. That is the existing segment formula behaving as documented, not a cancellation adjustment, but it can make a stayer's fare much higher than the pooled fare they were quoted.
 - The ৳20 bonus is charged on **every shared segment that covers distance**, so a journey cut into several shared segments pays it several times, and a very short shared segment can cost slightly more than riding it alone (`poolDiscount` is then 0, never negative). The ৳100 base is no longer a separate, never-discounted charge: it is part of `tripCost`, so it is split and spread with the rest.
-- **Private rides (sharing off) always pay the full trip cost** and are never pooled.
+- **Private rides (sharing off) always pay the flat trip cost** and are never pooled (see *Private rides*).
 
 **What each side sees**
 - **Passenger** — only their own fare, e.g. `৳110 (shared, you save ৳70)`. While on board it is marked *≈ estimate*; once their journey ends it shows *✓ Final fare*, with **how it was worked out** (`fareBreakdown`: each stretch's km, passengers on board, driver bonus and charge). The breakdown deliberately leaves out **zone names**: the checkpoints between a passenger's boarding and exit are where *other* passengers boarded or got off.
@@ -222,6 +222,16 @@ Because the distances in the zone table are not additive, a passenger who stays 
 
 #### Upgrading an existing database
 Fares used to be stored as integer paisa with a flat ৳30 pool discount. On startup the server converts stored fares to whole taka once (dividing by 100 and rounding to ৳5), re-prices any pool that has not started, and records this in the database's `user_version` so it never runs twice. A copy of the database file is saved next to it first (`database.sqlite.pre-taka-migration.bak`). The new `PoolCheckpoints` table is created automatically at startup; rides that were already `STARTED` before the upgrade have no boarding checkpoint, so they keep the fare they had. The cancellation columns (including `RideRequests.quotedFare`, the fare frozen when a passenger boards; a ride that was already `STARTED` before it has no stored quote and, if its passenger leaves, is charged half of its running estimate) are added by an idempotent startup migration (`RideEvents.lockedFare`, from an earlier version of this work, is renamed `fullTripEstimate`).
+
+### Private rides (Allow sharing off)
+The Request Ride form has an **Allow sharing** switch, **on by default** (pooling is unchanged while it is on). Switched off, the request is a **private ride** (`allowSharing: false`, main app flow only; the QR street-ride flow is separate and untouched):
+
+1. **Flat price.** The fare is always the flat `tripCost` of the route: Gulshan → Dhanmondi is exactly **৳300** (`100 + 10 km × 20 × seats`), at the request, while matched, on the trip and when it completes. The segment, split, ৳20 bonus and rounding logic is skipped for it altogether (`pooledFare` and `priceJourney` return the flat price; `recalculatePoolFares` never touches it). `poolDiscount` is 0 and its bill has no stretches. (Leaving mid-trip still follows the cancellation rule: half of the quoted ৳300.)
+2. **Never a pooling opportunity.** Passengers never see each other's requests, and a private ride never appears in another passenger's lists or joins their pool. For drivers: it is **not offered to a driver who already has a passenger** (pre-trip or mid-trip: `checkPoolJoin` refuses it against any non-empty vehicle), and a vehicle carrying a private ride, matched or started, **takes nobody** (the accept is refused with `VEHICLE_IS_PRIVATE` and the request is not in the pending list). It *is* offered to a driver whose vehicle is empty: that is how it gets a driver at all.
+3. **Capacity is only the baseline.** No multi-passenger pooling logic runs for it, but the atomic seat claim still does: the vehicle must have the seats the ride asked for (a 3-seat request on a 2-seat car, or a full car, is refused), so it can never overbook, even when two private requests are accepted at the same moment (exactly one wins).
+4. **Fixed for the ride's lifetime.** `allowSharing` is set when the ride is requested and can never change: no route edits it (a value sent with another action is ignored, and there is no edit route), and the model refuses any update to it, one at a time or in bulk, for a `REQUESTED`, `MATCHED` or `STARTED` ride alike. A shared ride cannot be turned private either.
+
+Tests: `privateRides.test.ts`.
 
 ### Concurrency Handling
 

@@ -266,6 +266,9 @@ export function cancellationFare(quotedFare: number): number {
  * final fare agree whenever the pool does not change during the trip: tripCost / n + 20.
  */
 export function pooledFare(pickup: string, dropoff: string, seatCount: number, poolSize: number, allowSharing = true): number {
+  // A PRIVATE ride (allowSharing = false) is never pooled: its fare is always the flat price of the route,
+  // whatever the pool looks like. The segment, split and rounding logic is skipped altogether.
+  if (!allowSharing) return calculateBaseFare(pickup, dropoff, seatCount);
   return segmentFare({ points: [{ zone: pickup, passengerCount: poolSize }], exitZone: dropoff, seatCount, allowSharing }).fare;
 }
 

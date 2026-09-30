@@ -92,11 +92,16 @@ export async function journeyPoints(
  * Returns null for a ride with no boarding checkpoint.
  */
 export async function priceJourney(
-  ride: { id: string; destinationZone: string; seatCount: number; allowSharing: boolean },
+  ride: { id: string; pickupZone?: string; destinationZone: string; seatCount: number; allowSharing: boolean; baseFare?: number },
   transaction: Transaction | null = null
 ): Promise<(SegmentFare & { exited: boolean; zones: string[] }) | null> {
   const journey = await journeyPoints(ride.id, transaction);
   if (!journey) return null;
+  // A PRIVATE ride is never split, so its fare is the flat price of the route: no segments, no split, no
+  // bonus, no rounding. (Nobody else is ever on board, and the checkpoints are not walked.)
+  if (!ride.allowSharing && ride.baseFare !== undefined && ride.baseFare > 0) {
+    return { segments: [], soloFare: ride.baseFare, fare: ride.baseFare, poolDiscount: 0, exited: journey.exited, zones: journey.zones };
+  }
   const priced = segmentFare({
     points: journey.points,
     ...(journey.exited ? {} : { exitZone: ride.destinationZone }),
