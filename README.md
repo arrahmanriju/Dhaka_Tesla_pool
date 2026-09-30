@@ -131,6 +131,13 @@ Passengers who share a Tesla split the cost of the stretches they actually share
 
 The last row is not in the original list of events, but a drop-off changes who is on board exactly like a cancellation does, so the next stretch has to be priced with one fewer passenger. The count is the number of rides on the vehicle that are `STARTED`. `runId` groups one continuous run of a vehicle: it begins when someone boards an empty vehicle and ends when the count returns to 0; a later trip is a new run and is never mixed in.
 
+**Zone distances — how they stay consistent.** Every fare is built from zone-to-zone km, so the distances have to add up the way roads do. The table in `fareCalculator.ts` lists the *direct road* distance between zones, and the distances the fare code uses are derived from it under two rules, checked when the server starts (it refuses to start otherwise) and again by `zoneDistances.test.ts`:
+
+1. **Triangle inequality.** `d(A, C) ≤ d(A, B) + d(B, C)` for every three zones: going through a zone is never shorter than the direct road. The table is closed under this rule when it is built (shortest paths), so an entry that is longer than a path through other zones is shortened to that path.
+2. **Corridors are exactly additive.** `ROAD_CORRIDORS` lists chains of zones that genuinely lie on one road, in order (Gulshan → Mohakhali → Dhanmondi; Uttara → Mirpur → Dhanmondi; Uttara → Mirpur → Mohammadpur; Uttara → Banani → Gulshan; Badda → Banani → Uttara; Banani → Gulshan → Gulshan 1; Gulshan 1 → Gulshan → Mohakhali). For any three zones on one corridor, `d(A, B) + d(B, C) = d(A, C)` exactly.
+
+So **Gulshan → Mohakhali → Dhanmondi is 3 + 7 = 10 km, the same as Gulshan → Dhanmondi direct**, and a rider alone through Mohakhali pays exactly the direct ৳300 (100 + 10 × 20). Two distances were wrong and are fixed: Dhanmondi–Mohakhali is **7 km** (it was 8, which made that trip 11 km) and Mohammadpur–Uttara is **14 km** (it was 15, longer than the path through Mirpur, 5 + 9). A zone that is *not* on the road is a detour: the sum through it is longer, never shorter (Gulshan → Banani → Dhanmondi is 2 + 9 = 11 km against 10). Only the listed corridors are guaranteed exactly additive; a zone that merely looks close to the way on a map is treated as a detour unless it is added to a corridor. One cost effect remains, and it is the fare formula, not the distances: in a pool every stretch shared by two or more carries its own ৳20 bonus, so two riders who share the whole way and pass a checkpoint at Mohakhali pay (90 / 2 + 20) + (210 / 2 + 20) = ৳190, against ৳170 for the same trip with no checkpoint.
+
 **The formula.** When a passenger's own journey ends (`COMPLETED` or `CANCELLED_IN_TRANSIT`), walk the checkpoints from where **they** boarded to where **they** got off. Each consecutive pair is a segment `zoneA → zoneB`, with `n` = the count at its first checkpoint (how many are on board, this passenger included).
 
 - **`tripCost`** of a route = `৳100 + distanceKm × ৳20 × seats`: what the passenger pays riding alone (Gulshan → Dhanmondi, 10 km, 1 seat: 100 + 200 = **৳300**). When the journey is cut into segments, that cost is spread over the journey **by distance**: a segment of `segKm` km gets `segKm / journeyKm` of it (`journeyKm` is the sum of the segment distances), so the pieces always add up to the whole.
@@ -140,21 +147,28 @@ The last row is not in the original list of events, but a drop-off changes who i
 - `poolDiscount = soloFare − fare` (never below 0), where `soloFare` is the whole journey's tripCost: what pooling saved on the stretches they travelled.
 - A private ride (sharing off) skips all of this: it is always the flat `tripCost` of its route (see *Private rides*).
 
-**Rounding rule — a shared split is rounded UP, for everybody on the segment.** Money is whole taka (integers, never paisa), and `tripCost / n` is often not a whole number (260 / 3 = 86.67). When it isn't, the split is **rounded up to the next whole taka, and every passenger sharing that segment pays that same rounded-up amount** (never "two pay 86 and one pays 87"), plus the ৳20 bonus: `ceil(tripCost / n) + 20`. The few extra fractions of a taka that this adds up to are **kept by the driver as additional profit**. It is applied in one place, the split calculation in `fareCalculator.ts` (`calculateSplit`), which every fare goes through: the quote before a ride, the running estimate, a completed ride's walk, and the stayers after a cancellation. It uses integer arithmetic only, so a fare is always a whole number and nothing can drift.
+**Rounding rule — a shared split is rounded UP, for everybody on the segment.** Money is whole taka (integers, never paisa), and `tripCost / n` is often not a whole number (160 / 3 = 53.33). When it isn't, the split is **rounded up to the next whole taka, and every passenger sharing that segment pays that same rounded-up amount** (never "two pay 86 and one pays 87"), plus the ৳20 bonus: `ceil(tripCost / n) + 20`. The few extra fractions of a taka that this adds up to are **kept by the driver as additional profit**. It is applied in one place, the split calculation in `fareCalculator.ts` (`calculateSplit`), which every fare goes through: the quote before a ride, the running estimate, a completed ride's walk, and the stayers after a cancellation. It uses integer arithmetic only, so a fare is always a whole number and nothing can drift.
 
 A **solo** segment is not split, so nothing is rounded up. One detail: when the ৳100 base is spread over a journey by distance, a solo segment's share can itself be a fraction (236.25), so the solo segments of a journey are rounded together (nearest whole taka, halves up, on their running total). That keeps a passenger who rides alone the whole way at exactly their trip cost, however many checkpoints cut the journey.
 
-**Worked example — the rounding.** A route Gulshan → midpoint → Dhanmondi. Person 1 rides alone to the midpoint (segment tripCost 40); the remaining leg costs 260.
+**Worked example — the rounding, with real numbers (run through the API on the real zones).** Three riders share Gulshan → Mohakhali (3 km, tripCost 100 + 60 = ৳160):
 
 | Step | Calculation | Pays |
 |---|---|---|
-| Person 1 alone, first leg | tripCost 40, no split | **৳40** |
-| Person 2 joins at the midpoint, 2 share the remaining leg | 260 / 2 + 20 = 130 + 20 (divides evenly) | **৳150** each |
-| Person 1's total | 40 + 150 | **৳190** |
-| Person 3 joins the same leg, 3 share it | 260 / 3 = 86.67 → **87** (up) + 20 | **৳107** each (not 106.67) |
-| **Revenue for the ride** | 40 + 107 × 3 | **৳361** |
+| The split | 160 / 3 = 53.33 → **54** (up), + 20 | **৳74** each, all three the same |
+| Revenue | 3 × 74 | **৳222** |
 
-Without rounding it would be 40 + 260 + 3 × 20 = ৳360: the extra **৳1** is the driver's rounding remainder (3 × 87 = 261 collected for a leg that cost 260). This scenario is in `roundingRule.test.ts`, which also checks that the total collected is always a whole number. (The zone table cannot produce a first leg of ৳40, since every trip costs at least the ৳100 base, so those segment costs are given directly to the split function. On the real zones Gulshan → Mohakhali → Dhanmondi the leg Mohakhali → Dhanmondi does cost exactly 100 + 8 × 20 = ৳260: two riders joining there pay ৳150 each and three pay ৳107 each, and the test runs that through the API.)
+Without rounding it would be 160 + 3 × 20 = ৳220: the extra **৳2** is the driver's rounding remainder (3 × 54 = 162 collected for a cost of 160). The same road with people joining part-way, also through the API (Gulshan → Mohakhali → Dhanmondi, tripCost ৳300; Mohakhali → Dhanmondi alone is 100 + 7 × 20 = ৳240):
+
+| Step | Calculation | Pays |
+|---|---|---|
+| Person 1 rides alone Gulshan → Mohakhali | 3/10 × 300 | **৳90** |
+| Person 2 joins at Mohakhali; both share Mohakhali → Dhanmondi (7 km, 2 on board) | Person 2: 240 / 2 + 20 · Person 1: 210 / 2 = 105, + 20 | Person 2 **৳140**, Person 1 **৳125** |
+| Person 1's total | 90 + 125 | **৳215** |
+| Person 3 joins at Mohakhali too; 3 share the 7 km leg | Persons 2 and 3: 240 / 3 = 80, + 20 · Person 1: 210 / 3 = 70, + 20 = 90, so 90 + 90 | **৳100** each, Person 1 **৳180** |
+| Revenue with all three | 180 + 100 + 100 | **৳380** |
+
+(Those two splits happen to divide evenly, which is why the ৳74 example above is the one that shows the round-up. The split formula is also tested in isolation, with hand-given segment costs, in `roundingRule.test.ts`; the real-zone numbers above are checked in the same file.)
 
 **Worked example — Gulshan → Dhanmondi (10 km, tripCost ৳300).** The same route with different numbers of riders on board the whole way:
 
@@ -165,20 +179,20 @@ Without rounding it would be 40 + 260 + 3 × 20 = ৳360: the extra **৳1** is 
 | 3 | 300 / 3 + 20 = 100 + 20 | **৳120** | ৳360 |
 | 4 | 300 / 4 + 20 = 75 + 20 | **৳95** | ৳380 |
 
-**A fourth passenger for only part of the route.** Three riders go Gulshan → Dhanmondi and the pool changes at **Mohakhali** (Gulshan–Mohakhali 3 km, Mohakhali–Dhanmondi 8 km). The zone table is not additive (3 + 8 = 11 km, against 10 km direct), so a rider who goes the whole way, now with a checkpoint at Mohakhali in their journey, is priced over 11 km: tripCost = 100 + 11 × 20 = **৳320**, and a 3 km segment gets 3/11 of it, an 8 km segment 8/11.
+**A fourth passenger for only part of the route.** Three riders go Gulshan → Dhanmondi and the pool changes at **Mohakhali**, which lies on that road (Gulshan–Mohakhali 3 km + Mohakhali–Dhanmondi 7 km = 10 km, exactly the direct distance). So the through-riders' journey is still 10 km, tripCost **৳300**, and a 3 km segment gets 3/10 of it, a 7 km segment 7/10.
 
 | | Segment | Exact amount | Charge |
 |---|---|---|---|
-| **Fourth boards at Mohakhali.** Each of the 3 full-route riders | Gulshan → Mohakhali, 3 on board | 3/11 × 320 = 87.27; / 3 = 29.09 → 30 (up); + 20 | 50 |
-| | Mohakhali → Dhanmondi, 4 on board | 8/11 × 320 = 232.73; / 4 = 58.18 → 59 (up); + 20 | 79 |
-| | **fare** = 50 + 79 | | **৳129** |
-| The fourth (8 km only, tripCost 100 + 160 = 260) | Mohakhali → Dhanmondi, 4 on board | 260 / 4 + 20 = 65 + 20 | **৳85** |
-| **Fourth rides from Gulshan and leaves at Mohakhali.** Each of the 3 others | Gulshan → Mohakhali, 4 on board | 87.27 / 4 = 21.82 → 22 (up); + 20 | 42 |
-| | Mohakhali → Dhanmondi, 3 on board | 232.73 / 3 = 77.58 → 78 (up); + 20 | 98 |
-| | **fare** = 42 + 98 | | **৳140** |
+| **Fourth boards at Mohakhali.** Each of the 3 full-route riders | Gulshan → Mohakhali, 3 on board | 3/10 × 300 = 90; / 3 = 30; + 20 | 50 |
+| | Mohakhali → Dhanmondi, 4 on board | 7/10 × 300 = 210; / 4 = 52.5 → 53 (up); + 20 | 73 |
+| | **fare** = 50 + 73 | | **৳123** |
+| The fourth (7 km only, tripCost 100 + 140 = 240) | Mohakhali → Dhanmondi, 4 on board | 240 / 4 + 20 = 60 + 20 | **৳80** |
+| **Fourth rides from Gulshan and leaves at Mohakhali.** Each of the 3 others | Gulshan → Mohakhali, 4 on board | 90 / 4 = 22.5 → 23 (up); + 20 | 43 |
+| | Mohakhali → Dhanmondi, 3 on board | 210 / 3 = 70; + 20 | 90 |
+| | **fare** = 43 + 90 | | **৳133** |
 | The fourth (3 km only, tripCost 100 + 60 = 160) | Gulshan → Mohakhali, 4 on board | 160 / 4 + 20 = 40 + 20 | **৳60** |
 
-The partial-route rider pays much less than a full-route rider (85 and 60, against 129 and 140), and the full-route riders pay differently from the plain 3-rider fare of ৳120, because the checkpoint at Mohakhali cuts their journey into two segments, each carrying the ৳20 bonus. The driver earns 3 × 129 + 85 = ৳472 in the first case and 3 × 140 + 60 = ৳480 in the second. (These are checked in `pricingModel.test.ts`.)
+The partial-route rider pays much less than a full-route rider (80 and 60, against 123 and 133), and the full-route riders pay differently from the plain 3-rider fare of ৳120, because the checkpoint at Mohakhali cuts their journey into two shared segments, each carrying the ৳20 bonus. The driver earns 3 × 123 + 80 = ৳449 in the first case and 3 × 133 + 60 = ৳459 in the second. (Checked in `pricingModel.test.ts`.)
 
 **Worked example — solo for one hop, then pooled for the next.** Zone distances: Uttara–Mirpur **9 km**, Mirpur–Dhanmondi **7 km**. Nusrat rides Uttara → Dhanmondi and starts alone; Rafiq is accepted mid-trip and boards at Mirpur, going to Dhanmondi; both are dropped at Dhanmondi (Nusrat first).
 
@@ -208,20 +222,20 @@ The driver earns ৳348 + ৳140 = **৳488**. Before Rafiq boards, Nusrat's run
 - This is a **deliberate, customer-friendly leniency policy**, not a price: it is flat, it ignores how far they travelled, and it does not walk the checkpoints the way a completed ride does. Do not read it as a pro-rated fare (the earlier pro-rated cancellation formula is gone).
 - **Everyone else is priced as usual, with no special adjustment.** The cancellation still creates a checkpoint (`PASSENGER_LEFT`, count − 1), so the stretches after it have one fewer passenger, and each passenger who stays is priced by the ordinary segment walk over their real checkpoints. Their fare is simply whatever that walk gives.
 
-**Worked example — Gulshan → Dhanmondi, tripCost ৳300, two pooled, one leaves at the midpoint.** Suppose the midpoint splits the route 5 km + 5 km (each half has tripCost 150):
+**Worked example — Gulshan → Dhanmondi, tripCost ৳300, two pooled, one leaves at Mohakhali** (real zones, run through the API; Mohakhali is 3 km of the 10 km, not the exact midpoint):
 
 | | Calculation | Pays |
 |---|---|---|
 | Both, pooled for the whole trip (quoted) | 300 / 2 + 20 | **৳170** each (৳340 together) |
-| The passenger who leaves at the midpoint | 170 / 2 | **৳85** |
-| The passenger who stays: Gulshan → midpoint, 2 on board | 150 / 2 + 20 = 95 | |
-| The passenger who stays: midpoint → Dhanmondi, alone | 150 (no split, no bonus) | |
-| | 95 + 150 | **৳245** |
-| **Driver's revenue** | 85 + 245 | **৳330** (against ৳340 if nobody had left) |
+| The passenger who leaves at Mohakhali | 170 / 2 | **৳85** |
+| The passenger who stays: Gulshan → Mohakhali, 2 on board | 3/10 × 300 = 90; / 2 = 45; + 20 | 65 |
+| The passenger who stays: Mohakhali → Dhanmondi, alone | 7/10 × 300 (no split, no bonus) | 210 |
+| | 65 + 210 | **৳275** |
+| **Driver's revenue** | 85 + 275 | **৳360** (against ৳340 if nobody had left) |
 
-This is checked with the real code in `cancellationPricing.test.ts`. The zone table has **no zone that is exactly halfway** between two others (a zone between Gulshan and Dhanmondi always adds a detour: Gulshan–Mohakhali 3 km + Mohakhali–Dhanmondi 8 km = 11, not 10), so that test hands `segmentFare` a small 5 km + 5 km network instead. On real zones the same rule is verified end to end through the API in `midTripCancellation.test.ts`, using Uttara → Mirpur → Dhanmondi (9 + 7 = 16 km, the one route where the table adds up): Nusrat and Rafiq both ride Uttara → Dhanmondi, tripCost 100 + 16 × 20 = ৳420, quoted 420 / 2 + 20 = **৳230** each; Rafiq leaves at Mirpur and pays 230 / 2 = **৳115**; Nusrat's walk is Uttara → Mirpur with 2 on board (9/16 × 420 = 236.25, / 2 = 118.125 → 119 (up), + 20 = 139) plus Mirpur → Dhanmondi alone (7/16 × 420 = 183.75 → 184) = **৳323**; the driver earns ৳438 (the two were quoted ৳460).
+The stayer pays more than the ৳170 they were quoted because they ride the longer 7 km stretch alone. The rule is also worked on an exact 5 km + 5 km midpoint (85 / 245 / 330) in `cancellationPricing.test.ts`, which hands `segmentFare` a small synthetic network to test the rule in isolation, and end to end on real zones in `midTripCancellation.test.ts`: Nusrat and Rafiq both ride Uttara → Dhanmondi (Uttara → Mirpur → Dhanmondi is 9 + 7 = 16 km), tripCost 100 + 16 × 20 = ৳420, quoted 420 / 2 + 20 = **৳230** each; Rafiq leaves at Mirpur and pays 230 / 2 = **৳115**; Nusrat's walk is Uttara → Mirpur with 2 on board (9/16 × 420 = 236.25, / 2 = 118.125 → 119 (up), + 20 = 139) plus Mirpur → Dhanmondi alone (7/16 × 420 = 183.75 → 184) = **৳323**; the driver earns ৳438 (the two were quoted ৳460).
 
-Because the distances in the zone table are not additive, a passenger who stays on board after someone leaves at an intermediate zone is priced over the checkpoint route, which can be longer than the direct one (see the assumptions below): they may pay noticeably more than the fare they were quoted.
+A passenger who stays after someone leaves at a zone that is a *detour* (off the road) is priced over the longer route through it, so they can pay noticeably more than they were quoted. A leaver's zone on the road, like Mohakhali above, does not lengthen anything: only the split changes.
 
 **What the fare is before the journey ends.** `estimatedFare` is an estimate, and `fareFinal` (in the API) is `false` until the passenger's own journey ends:
 - *Not on board yet* (`MATCHED`, `DRIVER_ARRIVED`): what they would pay if the pool now on the vehicle stayed together for the whole route, `tripCost / pool size + ৳20`. The **Request Ride** page shows the price alone and with 2 and 3 passengers (`GET /ride-requests/estimate` returns `baseFare`, `fare`, `poolFare` and `tiers`).
@@ -230,9 +244,9 @@ Because the distances in the zone table are not additive, a passenger who stays 
 
 **Rules and assumptions**
 - Each passenger is priced from **their own** pickup, exit and boarding time; pooled passengers can pay different amounts. The driver earns the **sum of what their passengers pay**.
-- **Stated assumptions.** (1) A hop through an intermediate zone is priced with the zone table, which is not geometric, so it can differ from the direct distance (Mirpur–Mohammadpur 5 km + Mohammadpur–Dhanmondi 3 km = 8 km, against Mirpur–Dhanmondi 7 km). (2) Every shared split is rounded up to a whole taka for all its passengers (see the rounding rule), so the driver can earn a few taka more than cost plus bonuses; every charge and every fare is a whole number. (3) A ride that started before checkpoints existed has no boarding checkpoint and simply keeps the fare it already had.
+- **Stated assumptions.** (1) A stop on the same road adds nothing to a journey's distance (see *Zone distances*), so cutting a journey at a checkpoint never makes it longer; a stop at a zone that is off the road is a detour and does (Mirpur–Mohammadpur 5 km + Mohammadpur–Dhanmondi 3 km = 8 km, against Mirpur–Dhanmondi 7 km). (2) Every shared split is rounded up to a whole taka for all its passengers (see the rounding rule), so the driver can earn a few taka more than cost plus bonuses; every charge and every fare is a whole number. (3) A ride that started before checkpoints existed has no boarding checkpoint and simply keeps the fare it already had.
 - `baseFare` stays the passenger's own **solo fare for the whole route** (`100 + distanceKm × 20 × seats`), set at request time; `poolDiscount` is what pooling saved (`baseFare − estimate` before the journey ends, `soloFare − fare` on the stretches travelled after it).
-- **A cancellation mid-route changes the stayer's journey.** The checkpoint at the cancellation zone cuts the remaining passenger's journey there, and a route through a zone can be longer than the direct one, so their journey is priced over that longer distance. That is the existing segment formula behaving as documented, not a cancellation adjustment, but it can make a stayer's fare much higher than the pooled fare they were quoted.
+- **A cancellation cuts the stayer's journey.** The checkpoint at the cancellation zone splits the remaining passenger's journey there. If that zone is on the road, the journey's length and trip cost do not change, only the split does (each stretch shared by two or more carries its own ৳20 bonus); if it is a detour zone, the journey is longer. Either way it is the ordinary segment formula, not a cancellation adjustment, and the stayer can end up paying more than the pooled fare they were quoted.
 - The ৳20 bonus is charged on **every shared segment that covers distance**, so a journey cut into several shared segments pays it several times, and a very short shared segment can cost slightly more than riding it alone (`poolDiscount` is then 0, never negative). The ৳100 base is no longer a separate, never-discounted charge: it is part of `tripCost`, so it is split and spread with the rest.
 - **Private rides (sharing off) always pay the flat trip cost** and are never pooled (see *Private rides*).
 
