@@ -54,7 +54,6 @@ describe('Request ride', () => {
       const res = await requestRide(nusrat, NUSRAT_RIDE);
       expect(res.status).toBe(201);
       expect(res.body.rideRequest).toMatchObject({
-        passengerId: nusrat.id,
         pickupZone: 'Banani',
         destinationZone: 'Mohakhali',
         seatCount: 1,
@@ -193,7 +192,9 @@ describe('Request ride', () => {
         .set(asUser(nusrat.id))
         .send({ ...NUSRAT_RIDE, passengerId: rafiq.id });
       expect(res.status).toBe(201);
-      expect(res.body.rideRequest.passengerId).toBe(nusrat.id);
+      // the ride belongs to Nusrat (checked in the database: the response carries no user id)
+      expect((await RideRequest.findByPk(res.body.rideRequest.id))!.passengerId).toBe(nusrat.id);
+      expect(res.body.rideRequest.passengerId).toBeUndefined();
     });
 
     it('rejects a driver', async () => {
