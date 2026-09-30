@@ -71,7 +71,7 @@ export default function PassengerDashboard() {
         {tab === 'active'   && (
           <ActiveRidesTab onNavigate={setTab} justRequested={justRequested} />
         )}
-        {tab === 'street'   && <StreetRideTab initialCode={streetCode} />}
+        {tab === 'street'   && <StreetRideTab initialCode={streetCode} onFinished={() => setTab('history')} />}
         {tab === 'history'  && <HistoryTab />}
       </div>
     </div>
@@ -490,12 +490,16 @@ function HistoryTab() {
       ) : (
         <div className="ride-list">
           {rides.map((ride) => (
-            <div key={ride.id} className="ride-card">
+            <div key={`${ride.source ?? 'APP'}-${ride.id}`} className="ride-card" data-source={ride.source ?? 'APP'}>
               <div className="ride-card__route">
                 <span className="ride-card__zone">{tz(ride.pickupZone)}</span>
                 <span className="ride-card__arrow">→</span>
                 <span className="ride-card__zone">{tz(ride.destinationZone)}</span>
                 <StatusBadge status={ride.status} />
+                {/* Which flow this trip came from, so a street ride is never mistaken for an app ride */}
+                <span className={`badge ${ride.source === 'QR' ? 'badge--matched' : 'badge--completed'}`} style={{ fontSize: 11 }} id={`source-${ride.id}`}>
+                  {ride.source === 'QR' ? `🛺 ${t('p.history.sourceQR')}` : `📱 ${t('p.history.sourceApp')}`}
+                </span>
               </div>
               <div className="ride-card__meta">
                 <span className="ride-card__meta-item">
@@ -510,6 +514,22 @@ function HistoryTab() {
                   })}
                 </span>
               </div>
+              {ride.source === 'QR' && ride.qr && (
+                <div className="ride-block" id={`qr-details-${ride.id}`}>
+                  <div className="ride-block__line">
+                    🛺 {ride.qr.vehicleNickname} · {ride.qr.vehicleCode}
+                    {' · '}{t('qr.hist.joined', { time: new Date(ride.qr.joinedAt).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' }) })}
+                    {ride.qr.exitedAt && <>{' · '}{t(ride.qr.autoCompleted ? 'qr.status.AUTO_COMPLETED' : 'qr.hist.arrived', { time: new Date(ride.qr.exitedAt).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' }) })}</>}
+                  </div>
+                  {ride.paymentStatus === 'CASH_DUE' && (
+                    <div className="ride-block__line">💵 {t('qr.payCash', { amount: ride.paymentAmount ?? ride.estimatedFare })}</div>
+                  )}
+                  {ride.qr.driverBonus > 0 && (
+                    <div className="ride-block__line">{t('qr.hist.bonus', { amount: ride.qr.driverBonus })}</div>
+                  )}
+                  {ride.qr.autoCompleted && <div className="ride-block__line">{t('qr.autoNote')}</div>}
+                </div>
+              )}
             </div>
           ))}
         </div>

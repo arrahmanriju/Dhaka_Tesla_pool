@@ -233,6 +233,24 @@ export interface Ride {
   paymentAmount?: number | null;
   /** true when this passenger was matched while another passenger was already travelling */
   joinedMidTrip?: boolean;
+  /** Which flow a history row came from: the app, or a street ride joined by QR code */
+  source?: 'APP' | 'QR';
+  /** Only on a QR row: what a street trip has that an app ride does not */
+  qr?: {
+    sessionId: string;
+    passengerNumber: number;
+    /** The session timed out before the passenger confirmed arrival, so it was ended for them */
+    autoCompleted: boolean;
+    joinedAt: string;
+    exitedAt: string | null;
+    sessionStatus: 'OPEN' | 'CLOSED';
+    sessionClosedAt: string | null;
+    sessionCloseReason: 'ALL_ARRIVED' | 'TIMEOUT' | null;
+    vehicleCode: string | null;
+    vehicleNickname: string | null;
+    /** The bonus this passenger's joining earned the driver (0 for the first passenger) */
+    driverBonus: number;
+  };
   createdAt: string;
   updatedAt: string;
 }

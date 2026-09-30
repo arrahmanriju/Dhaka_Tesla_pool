@@ -22,7 +22,7 @@ type DetectorCtor = new (opts: { formats: string[] }) => Detector;
  * sticker (or types the code), joins, and taps "I've arrived" when they get off. Others in the car
  * appear only as "Passenger 1", "Passenger 2". Payment is always cash.
  */
-export function StreetRideTab({ initialCode = '' }: { initialCode?: string }) {
+export function StreetRideTab({ initialCode = '', onFinished }: { initialCode?: string; onFinished?: () => void }) {
   const { t, tz, tp } = usePreferences();
   const formatError = useFormatApiError();
 
@@ -71,11 +71,21 @@ export function StreetRideTab({ initialCode = '' }: { initialCode?: string }) {
         <ErrorState message={loadError} onRetry={() => load()} />
       ) : (
         <>
-          {session && <SessionCard session={session} onChange={setSession} tz={tz} t={t} tp={tp} formatError={formatError} />}
-          {!open && <JoinForm initialCode={initialCode} onJoined={setSession} hasEnded={!!session} />}
-          {!session && !open && (
-            <EmptyState icon="🛺" title={t('qr.emptyTitle')} description={t('qr.emptyDesc')} />
+          {session && (
+            <SessionCard
+              session={session}
+              // "I've arrived": this page has nothing more to show. The trip is in the ride history now.
+              onArrived={() => { setSession(null); onFinished?.(); }}
+              tz={tz}
+              t={t}
+              tp={tp}
+              formatError={formatError}
+            />
           )}
+          {/* No ride in progress (never joined, or the last one has ended and moved to History): the normal
+              "scan or enter a vehicle code" state, ready for a new ride */}
+          {!open && <JoinForm initialCode={initialCode} onJoined={setSession} />}
+          {!open && <EmptyState icon="🛺" title={t('qr.emptyTitle')} description={t('qr.emptyDesc')} />}
         </>
       )}
     </div>
@@ -83,7 +93,7 @@ export function StreetRideTab({ initialCode = '' }: { initialCode?: string }) {
 }
 
 // ─── Joining ───────────────────────────────────────────────────────────────
-function JoinForm({ initialCode, onJoined, hasEnded }: { initialCode: string; onJoined: (s: QRSession) => void; hasEnded: boolean }) {
+function JoinForm({ initialCode, onJoined }: { initialCode: string; onJoined: (s: QRSession) => void }) {
   const { t, tz } = usePreferences();
   const formatError = useFormatApiError();
   const [code, setCode] = useState(initialCode);
@@ -179,9 +189,8 @@ function JoinForm({ initialCode, onJoined, hasEnded }: { initialCode: string; on
   const full = !!preview && preview.vehicle.seatsFree < 1;
 
   return (
-    <div className="card" style={{ marginTop: hasEnded ? 16 : 0 }}>
+    <div className="card">
       <div className="card__body" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-        {hasEnded && <h2 className="card__title">{t('qr.new')}</h2>}
         {error && <ErrorBanner message={error} />}
 
         <form onSubmit={(e) => { e.preventDefault(); find(code); }} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -258,14 +267,14 @@ type Translate = ReturnType<typeof usePreferences>['t'];
 
 function SessionCard({
   session,
-  onChange,
+  onArrived,
   tz,
   t,
   tp,
   formatError,
 }: {
   session: QRSession;
-  onChange: (s: QRSession) => void;
+  onArrived: () => void;
   tz: (zone: string) => string;
   t: Translate;
   tp: ReturnType<typeof usePreferences>['tp'];
@@ -279,7 +288,8 @@ function SessionCard({
   const arrived = async () => {
     setBusy(true); setError('');
     try {
-      onChange((await qrApi.arrived(session.id)).session);
+      await qrApi.arrived(session.id);
+      onArrived();
     } catch (err) {
       setError(formatError(err));
     } finally {
@@ -296,15 +306,6 @@ function SessionCard({
         <span className={`badge badge--${you.status === 'RIDING' ? 'started' : 'completed'}`}>{t(`qr.status.${you.status}` as TranslationKey)}</span>
       </div>
       {session.vehicle.nickname && <p className="form-hint">🛺 {session.vehicle.nickname} · {session.vehicle.vehicleCode}</p>}
-
-      {session.status === 'CLOSED' && (
-        <div className="info-banner" id="street-closed" role="status">
-          {session.closeReason === 'TIMEOUT'
-            ? t('qr.closed.TIMEOUT', { min: session.autoCloseAfterMinutes })
-            : t('qr.closed.ALL_ARRIVED')}
-          {you.status === 'AUTO_COMPLETED' && <><br />{t('qr.autoNote')}</>}
-        </div>
-      )}
 
       {/* Everyone in the car, as Passenger N only */}
       <section className="ride-block" id="street-passengers" aria-label={t('qr.others')}>
