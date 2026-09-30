@@ -190,6 +190,34 @@ export async function migrateMidTripCancellation(): Promise<void> {
 }
 
 /**
+ * Idempotent: adds `RideRequests.poolNumber` ("Passenger N", see utils/passengerLabels.ts) and numbers the rides that
+ * were accepted before it existed: per vehicle, in the order they were created, so every driver-facing view can
+ * say "Passenger N" instead of a name.
+ */
+export async function migratePassengerLabels(): Promise<void> {
+  const [cols] = (await sequelize.query('PRAGMA table_info(`RideRequests`)')) as [{ name: string }[], unknown];
+  if (cols.length === 0) return; // fresh database: sync() creates the column
+  if (!cols.some((c) => c.name === 'poolNumber')) {
+    await sequelize.query('ALTER TABLE `RideRequests` ADD COLUMN `poolNumber` INTEGER');
+    console.log('[migrate] RideRequests: added poolNumber column');
+  }
+  const [vehicles] = (await sequelize.query(
+    'SELECT DISTINCT `vehicleId` FROM `RideRequests` WHERE `vehicleId` IS NOT NULL AND `poolNumber` IS NULL'
+  )) as [{ vehicleId: string }[], unknown];
+  for (const { vehicleId } of vehicles) {
+    const [rides] = (await sequelize.query(
+      'SELECT `id` FROM `RideRequests` WHERE `vehicleId` = ? AND `poolNumber` IS NULL ORDER BY `createdAt` ASC',
+      { replacements: [vehicleId] }
+    )) as [{ id: string }[], unknown];
+    let n = ((await sequelize.query('SELECT MAX(`poolNumber`) AS m FROM `RideRequests` WHERE `vehicleId` = ?', { replacements: [vehicleId] }))[0] as any[])[0]?.m ?? 0;
+    for (const r of rides) {
+      n += 1;
+      await sequelize.query('UPDATE `RideRequests` SET `poolNumber` = ? WHERE `id` = ?', { replacements: [n, r.id] });
+    }
+  }
+}
+
+/**
  * Idempotent: adds the columns behind simulated payments to a database created before they existed:
  * `Users.walletBalance` and `RideRequests.paymentMethod / paymentStatus / paymentAmount`.
  * Existing users start with an empty wallet and existing rides are cash rides with nothing due

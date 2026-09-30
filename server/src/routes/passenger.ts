@@ -8,6 +8,7 @@ import { priceJourney, recordExit } from '../utils/checkpoints';
 import { cancellationFare } from '../utils/fareCalculator';
 import { closeStaleSessions, getQRHistory } from '../services/qrRides';
 import { collectPayment } from '../utils/payments';
+import { passengerLabel } from '../utils/passengerLabels';
 import { releaseSeats } from '../utils/seats';
 import { recordRideEvent, joinedMidTrip } from '../utils/rideEvents';
 
@@ -116,7 +117,6 @@ async function findOwnedRide(rideId: string, passengerId: string, res: Response)
 const IN_PROGRESS: RideStatus[] = ['MATCHED', 'DRIVER_ARRIVED', 'STARTED'];
 const OPEN: RideStatus[] = ['REQUESTED', 'MATCHED', 'DRIVER_ARRIVED', 'STARTED'];
 
-const firstName = (fullName: string | null | undefined) => (fullName ?? '').trim().split(/\s+/)[0] ?? '';
 
 // ---------------------------------------------------------------------------
 // The passenger's OWN lifecycle history: when the ride was requested, matched, and so on.
@@ -191,26 +191,26 @@ async function enrichRide(ride: any, timeline: any[] = []) {
   let pool: {
     isShared: boolean;
     poolSize: number;
-    otherPassengers: { firstName: string }[];
+    /** The others in the car, only as "Passenger N" (never a name or an id), in the order they joined */
+    otherPassengers: { label: string; number: number }[];
+    /** This passenger's own number: "You are Passenger N" */
+    yourNumber: number | null;
     seatsTaken: number;
     seatCapacity: number;
   } | null = null;
   if (ride.vehicleId && vehicle && OPEN.includes(status)) {
-    // Only the columns needed to count seats and find names — no fares, zones or phones are read.
+    // Only the columns needed to count seats and number the others — no names, ids, fares, zones or phones are read.
     const poolRides: any[] = await RideRequest.findAll({
       where: { vehicleId: ride.vehicleId, status: { [Op.in]: OPEN } },
-      attributes: ['id', 'passengerId', 'seatCount'],
-      order: [['createdAt', 'ASC']],
+      attributes: ['id', 'seatCount', 'poolNumber'],
+      order: [['poolNumber', 'ASC'], ['createdAt', 'ASC']],
     });
     const others = poolRides.filter((r) => r.id !== ride.id);
-    const users: any[] = others.length
-      ? await User.findAll({ where: { id: others.map((r) => r.passengerId) }, attributes: ['id', 'name'] })
-      : [];
-    const names = new Map(users.map((u) => [u.id, firstName(u.name)]));
     pool = {
       isShared: others.length > 0,
       poolSize: Math.max(1, poolRides.length),
-      otherPassengers: others.map((r) => ({ firstName: names.get(r.passengerId) ?? '' })),
+      otherPassengers: others.map((r) => ({ label: passengerLabel(r.poolNumber) ?? 'Passenger', number: r.poolNumber ?? 0 })),
+      yourNumber: ride.poolNumber ?? null,
       seatsTaken: poolRides.reduce((sum, r) => sum + r.seatCount, 0),
       seatCapacity: vehicle.seatCapacity,
     };
@@ -222,7 +222,6 @@ async function enrichRide(ride: any, timeline: any[] = []) {
 
   return {
     id: ride.id,
-    passengerId: ride.passengerId,
     pickupZone: ride.pickupZone,
     destinationZone: ride.destinationZone,
     seatCount: ride.seatCount,
