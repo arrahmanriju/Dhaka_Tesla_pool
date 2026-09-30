@@ -1,4 +1,7 @@
+// Load server/.env before DB_STORAGE_PATH is read (this module is imported before index.ts runs dotenv.config())
+import 'dotenv/config';
 import { Sequelize } from 'sequelize';
+import fs from 'fs';
 import path from 'path';
 import { User, initUser } from './User';
 import { Vehicle, initVehicle } from './Vehicle';
@@ -13,6 +16,8 @@ import { QRRideSession, QRRideParticipant, DriverBonus, initQRRide } from './QRR
 
 // Setup Sequelize for SQLite
 export const storagePath = process.env.DB_STORAGE_PATH || path.join(__dirname, '../../data/database.sqlite');
+// On a host the database sits on a mounted volume (e.g. /app/data): make sure its folder exists
+fs.mkdirSync(path.dirname(path.resolve(storagePath)), { recursive: true });
 
 export const sequelize = new Sequelize({
   dialect: 'sqlite',
