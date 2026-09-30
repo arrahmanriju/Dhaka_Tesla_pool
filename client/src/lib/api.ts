@@ -283,6 +283,8 @@ export interface Vehicle {
   id: string;
   modelName: string;
   licensePlate: string;
+  /** The public code on the vehicle's QR sticker and typed for street rides: the driver's Tesla ID when they have one */
+  vehicleCode?: string;
   seatCapacity: number;
   occupiedSeats: number;
   driverId: string;
