@@ -127,11 +127,10 @@ export interface RideRequestInput {
 /** What one passenger pays when `passengers` people share the ride (whole taka). */
 export interface FareTier {
   passengers: number;
-  ratePercent: number;
   fare: number;
 }
 
-/** All money is whole taka, a multiple of ৳5. */
+/** All money is whole taka. */
 export interface FareEstimate {
   /** Their own full fare (pickup → destination) */
   baseFare: number;
@@ -183,7 +182,6 @@ export interface Ride {
   /** Passengers currently in the pool, including this one */
   poolSize?: number;
   /** Percentage of the distance charge this passenger pays with the current pool (100 / 70 / 55) */
-  shareRatePercent?: number;
   status: RideStatus;
   canCancel?: boolean;
   vehicle?: {
@@ -257,21 +255,17 @@ export interface PoolEvent {
 /** One stretch of a passenger's journey between two checkpoints (zone names are not sent to passengers). */
 export interface FareSegment {
   distanceKm: number;
-  /** distanceKm × ৳20 × seats */
-  distanceCharge: number;
   /** Passengers on board during this stretch */
   passengers: number;
-  /** 100 when alone, 70 with 2, 55 with 3 */
-  ratePercent: number;
-  /** distanceCharge × ratePercent / 100 */
+  /** The flat driver bonus inside `charge`: ৳20 when 2 or more were on board, else 0 */
+  driverBonus: number;
+  /** What the passenger pays for this stretch: their share of the trip cost + the driver bonus */
   charge: number;
 }
 
-/** fare = ৳100 base + Σ segment charges, to the nearest ৳5. `final` once the passenger's journey has ended. */
+/** fare = Σ segment charges (trip cost split between the riders on board, + ৳20 each shared stretch). `final` once the journey has ended. */
 export interface FareBreakdown {
-  baseCharge: number;
   segments: FareSegment[];
-  distanceTotal: number | null;
   soloFare: number | null;
   poolDiscount: number | null;
   fare: number;

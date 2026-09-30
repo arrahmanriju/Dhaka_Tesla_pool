@@ -19,38 +19,17 @@ const DISTANCE_MATRIX: Record<string, Record<string, number>> = {
 // ---------------------------------------------------------------------------
 // Fare constants — all money in this app is WHOLE TAKA (integers, never paisa)
 // ---------------------------------------------------------------------------
-/** Fixed part of a route's base fare (BDT) */
+/** Fixed part of a trip's cost (BDT) */
 export const BASE_FARE_BDT = 100;
 
 /** Variable charge per km per seat (BDT) */
 export const RATE_PER_KM_PER_SEAT_BDT = 20;
 
-/** Every fare is rounded to the nearest ৳5. */
-export const FARE_ROUNDING_BDT = 5;
+/** Flat driver bonus every passenger pays on each stretch they share with at least one other (BDT). */
+export const DRIVER_BONUS_BDT = 20;
 
-// ---------------------------------------------------------------------------
-// SHARE RATE — how much of the DISTANCE CHARGE of a stretch each passenger pays, by how many are on board.
-//
-//   1 passenger  → 100%   driver earns 100% of the distance charge
-//   2 passengers →  70%   each; driver earns 140%
-//   3 passengers →  55%   each; driver earns 165%
-//
-// Kept as whole percentages so every calculation is exact integer arithmetic
-// (0.7 × 180 in floating point is 125.99999999999999).
-// A pool larger than 3 keeps the 3-passenger rate (the fleet's largest Tesla seats 3,
-// but older vehicles registered before onboarding may be bigger).
-// ---------------------------------------------------------------------------
-export const SHARE_RATE_PERCENT: Readonly<Record<number, number>> = { 1: 100, 2: 70, 3: 55 };
-export const MAX_RATE_TIER = 3;
-
-/**
- * Percentage of the distance charge a passenger pays.
- * A private ride (allowSharing = false) always pays 100%, whatever the pool looks like.
- */
-export function shareRatePercent(poolSize: number, allowSharing = true): number {
-  if (!allowSharing || poolSize <= 1) return SHARE_RATE_PERCENT[1]!;
-  return SHARE_RATE_PERCENT[Math.min(Math.floor(poolSize), MAX_RATE_TIER)]!;
-}
+/** The Request Ride page quotes the price for a pool of up to this many passengers. */
+export const MAX_QUOTED_POOL_SIZE = 3;
 
 // ---------------------------------------------------------------------------
 // Distance helper
@@ -62,72 +41,68 @@ function getDistance(pickup: DhakaZone, dropoff: DhakaZone): number {
     ?? 8; // fallback default
 }
 
-/** Rounds a taka amount to the nearest ৳5 (halves round up). */
-export function roundToNearest5(taka: number): number {
-  // (taka + 2.5) / 5 written as (2 × taka + 5) / 10, so a whole-taka input never goes through a fraction
-  return Math.floor((2 * taka + FARE_ROUNDING_BDT) / (2 * FARE_ROUNDING_BDT)) * FARE_ROUNDING_BDT;
-}
-
 // ---------------------------------------------------------------------------
-// calculateBaseFare
+// calculateBaseFare  =  the TRIP COST of a route
 //
-// A passenger's OWN base fare: what their pickup → destination costs when they ride alone.
+// What pickup → destination costs when the passenger rides alone (the trip cost the fare model splits):
 //
-//   baseFare = 100 + distanceKm × 20 × seatCount        (whole taka)
+//   tripCost = 100 + distanceKm × 20 × seatCount        (whole taka)
 //
-// Example (Mohakhali → Badda, 4 km, 1 seat):  100 + 4 × 20 × 1 = ৳180
-// Set once when the ride is requested and never changes.
+// Example (Gulshan → Dhanmondi, 10 km, 1 seat):  100 + 10 × 20 × 1 = ৳300
+// Always a multiple of ৳20. Set once when the ride is requested and never changes.
 // ---------------------------------------------------------------------------
 export function calculateBaseFare(pickup: string, dropoff: string, seatCount: number): number {
   if (!DHAKA_ZONES.includes(pickup as any) || !DHAKA_ZONES.includes(dropoff as any)) {
     throw new Error('Invalid zone');
   }
   const distanceKm = getDistance(pickup as DhakaZone, dropoff as DhakaZone);
-  return roundToNearest5(BASE_FARE_BDT + distanceKm * RATE_PER_KM_PER_SEAT_BDT * seatCount);
+  return BASE_FARE_BDT + distanceKm * RATE_PER_KM_PER_SEAT_BDT * seatCount;
 }
 
 // ---------------------------------------------------------------------------
-// SEGMENT-BASED FARES  (replaces the old "quote × share rate, then lock at START" model)
+// SEGMENT-BASED FARES
 //
 // A passenger's journey is cut into SEGMENTS at the pool's CHECKPOINTS (see models/PoolCheckpoint.ts):
 // a checkpoint is a zone where the number of passengers on the vehicle changed. Walk the checkpoints
 // from where the passenger boarded to where they got off; each consecutive pair is a segment.
 //
-//   for each segment  zoneA → zoneB, with n passengers on board during it:
-//       distanceCharge = distanceKm(zoneA → zoneB) × ৳20 × seatCount
-//       charge         = distanceCharge × shareRate(n)         shareRate: 1 → 100%, 2 → 70%, 3+ → 55%
-//                        (so the pool discount applies only when n > 1)
-//   fare = ৳100 base fare (once, never discounted) + Σ charge, rounded to the nearest ৳5
-//   poolDiscount = (৳100 + Σ distanceCharge, rounded)  −  fare        what pooling saved on this journey
+// For a segment with n passengers on board:
+//
+//   tripCost(segment) = the passenger's trip cost, spread over their journey by distance:
+//                         100 × segKm / journeyKm  +  20 × segKm × seats
+//                       (journeyKm = the sum of the segment distances, so the pieces add up to the whole
+//                        trip cost: 100 + 20 × journeyKm × seats)
+//   n = 1  →  segmentFare = tripCost(segment)                 riding alone: the full cost, nothing changes
+//   n ≥ 2  →  segmentFare = tripCost(segment) / n + ৳20       an even split, THEN a flat ৳20 driver bonus
+//                                                              for each passenger sharing the segment
+//
+//   fare = Σ segmentFare over the segments the passenger was on board for
+//
+// A passenger who rides the whole route with the same n therefore pays  tripCost / n + 20.
+// The bonus applies to a segment that covers distance (a 0 km hop between two checkpoints in the same
+// zone earns none). A private ride (allowSharing = false) is always priced as n = 1.
+//
+// ROUNDING RULE (whole taka, exact, reproducible by hand)
+//   tripCost / n is rarely a whole number, so the fare is rounded to the NEAREST WHOLE TAKA, HALVES UP,
+//   applied to the RUNNING TOTAL rather than to each piece:
+//       segment charge = round(total up to the end of this segment) − round(total up to its start)
+//   So every segment charge is a whole number of taka, the charges add up EXACTLY to the fare, and the
+//   fare is the exact total rounded once. (Rounding each segment separately could drift by a taka per
+//   segment, and a passenger who rode alone would no longer pay exactly their trip cost.) The ৳20 bonus
+//   is a whole number, so only the split part is ever rounded. All arithmetic is on integers.
 //
 // The passenger's own exit (drop-off at their destination, or a mid-trip cancellation at a zone they
 // name) is a checkpoint like any other, so a cancellation is not a special case: the journey simply
 // ends at that checkpoint and the same walk prices it.
 //
 // Distances come from the zone table above. Two checkpoints in the same zone are 0 km apart (no
-// charge), unlike calculateBaseFare, where a trip must have two different zones.
+// charge). A journey of 0 km in total costs the ৳100 base.
 //
-// WORKED EXAMPLE — Nusrat rides Uttara → Dhanmondi; Rafiq boards at Mirpur and both go to Dhanmondi.
-//   checkpoints:  (Uttara, 1)  (Mirpur, 2)  (Dhanmondi, 1) (Nusrat drops)  (Dhanmondi, 0) (Rafiq drops)
-//   Nusrat: Uttara → Mirpur    9 km × 20 = ৳180, alone (100%)        = ৳180
-//           Mirpur → Dhanmondi 7 km × 20 = ৳140, 2 on board (70%)    = ৳98
-//           fare = 100 + 180 + 98 = ৳378 → ৳380      (riding alone all the way: 100 + 320 = ৳420)
-//   Rafiq:  Mirpur → Dhanmondi ৳140 × 70% = ৳98;  fare = 100 + 98 = ৳198 → ৳200   (alone: 100 + 140 = ৳240)
+// WORKED EXAMPLE — Gulshan → Dhanmondi, 10 km, tripCost = 100 + 10 × 20 = ৳300:
+//   alone              ৳300
+//   2 on board         300 / 2 + 20 = 150 + 20 = ৳170 each
+//   3 on board         300 / 3 + 20 = 100 + 20 = ৳120 each
 // ---------------------------------------------------------------------------
-
-/**
- * `percent` % of a whole-taka amount, as a whole number of taka. Fails loudly instead of truncating:
- * a distance charge is km × ৳20 × seats, always a multiple of 20, and the rates are 100, 70 and 55, so
- * the result is always exact. If that ever stops being true (a new rate, a fractional distance) this
- * throws rather than silently losing a fraction of a taka.
- */
-export function percentOf(amount: number, percent: number): number {
-  const product = amount * percent;
-  if (!Number.isSafeInteger(product) || product % 100 !== 0) {
-    throw new Error(`${percent}% of ৳${amount} is not a whole number of taka`);
-  }
-  return product / 100;
-}
 
 /** Distance for one segment: 0 within a zone, otherwise the table distance. */
 export function segmentDistanceKm(from: string, to: string): number {
@@ -146,27 +121,26 @@ export interface FareSegment {
   fromZone: string;
   toZone: string;
   distanceKm: number;
-  distanceCharge: number;
-  /** Passengers on board during this segment */
+  /** Passengers on board during this segment (1 for a private ride) */
   passengers: number;
-  /** Share rate applied: 100 when alone, 70 with 2, 55 with 3+ */
-  ratePercent: number;
-  /** distanceCharge × ratePercent / 100 (a whole number of taka: distance charges are multiples of ৳20) */
+  /** The flat driver bonus inside `charge`: ৳20 when 2 or more were on board, else 0 */
+  driverBonus: number;
+  /** What this passenger pays for the segment, in whole taka (see the rounding rule above) */
   charge: number;
 }
 
 export interface SegmentFare {
-  baseCharge: number;
   segments: FareSegment[];
-  /** Σ distanceCharge, before any pool discount */
-  distanceTotal: number;
-  /** What the same journey would cost riding alone (rounded to ৳5) */
+  /** What the whole journey costs riding alone: 100 + 20 × journeyKm × seats */
   soloFare: number;
-  /** What the passenger pays (whole taka, a multiple of ৳5) */
+  /** What the passenger pays (whole taka) = Σ segment charges */
   fare: number;
-  /** soloFare − fare */
+  /** soloFare − fare, never below 0 (a very short shared stretch can cost slightly more than riding alone) */
   poolDiscount: number;
 }
+
+const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
+const lcm = (a: number, b: number): number => (a / gcd(a, b)) * b;
 
 /**
  * Prices a journey from its checkpoints.
@@ -187,32 +161,51 @@ export function segmentFare(input: {
   for (let i = 0; i + 1 < points.length; i++) legs.push({ from: points[i]!, toZone: points[i + 1]!.zone });
   if (exitZone !== undefined) legs.push({ from: points[points.length - 1]!, toZone: exitZone });
 
-  const segments: FareSegment[] = legs.map(({ from, toZone }) => {
-    const distanceKm = segmentDistanceKm(from.zone, toZone);
-    const distanceCharge = distanceKm * RATE_PER_KM_PER_SEAT_BDT * seatCount;
-    const ratePercent = shareRatePercent(from.passengerCount, allowSharing);
+  const raw = legs.map(({ from, toZone }) => ({
+    fromZone: from.zone,
+    toZone,
+    distanceKm: segmentDistanceKm(from.zone, toZone),
+    passengers: allowSharing ? Math.max(1, Math.floor(from.passengerCount)) : 1,
+  }));
+
+  const journeyKm = raw.reduce((sum, s) => sum + s.distanceKm, 0);
+  const soloFare = BASE_FARE_BDT + RATE_PER_KM_PER_SEAT_BDT * seatCount * journeyKm;
+  if (journeyKm === 0) {
+    // nowhere travelled: just the base, and nothing to split
     return {
-      fromZone: from.zone,
-      toZone,
-      distanceKm,
-      distanceCharge,
-      passengers: from.passengerCount,
-      ratePercent,
-      charge: percentOf(distanceCharge, ratePercent),
+      segments: raw.map((s) => ({ ...s, driverBonus: 0, charge: 0 })),
+      soloFare,
+      fare: soloFare,
+      poolDiscount: 0,
     };
+  }
+
+  // Exact arithmetic in units of 1/D, with D = journeyKm × lcm(passenger counts), so nothing is a fraction:
+  //   tripCost(segment) / n  =  segKm × soloFare × (L / n)  units
+  const L = raw.reduce((l, s) => (s.distanceKm > 0 ? lcm(l, s.passengers) : l), 1);
+  const D = journeyKm * L;
+  const roundHalfUp = (units: number) => Math.floor((2 * units + D) / (2 * D)); // units / D, nearest, halves up
+
+  let cumulative = 0;
+  let roundedBefore = 0;
+  const segments: FareSegment[] = raw.map((s) => {
+    const driverBonus = s.passengers >= 2 && s.distanceKm > 0 ? DRIVER_BONUS_BDT : 0;
+    cumulative += s.distanceKm * soloFare * (L / s.passengers) + driverBonus * D;
+    const roundedTotal = roundHalfUp(cumulative);
+    const charge = roundedTotal - roundedBefore;
+    roundedBefore = roundedTotal;
+    return { ...s, driverBonus, charge };
   });
 
-  const distanceTotal = segments.reduce((s, x) => s + x.distanceCharge, 0);
-  const chargeTotal = segments.reduce((s, x) => s + x.charge, 0);
-  const fare = roundToNearest5(BASE_FARE_BDT + chargeTotal);
-  const soloFare = roundToNearest5(BASE_FARE_BDT + distanceTotal);
-  return { baseCharge: BASE_FARE_BDT, segments, distanceTotal, soloFare, fare, poolDiscount: soloFare - fare };
+  if (!Number.isSafeInteger(2 * cumulative + D)) throw new Error('Fare arithmetic overflow');
+  const fare = roundedBefore;
+  return { segments, soloFare, fare, poolDiscount: Math.max(0, soloFare - fare) };
 }
 
 /**
  * The fare for a whole route with a constant number of passengers on board: the QUOTE shown before
  * a ride starts (and the running estimate). It is segmentFare() with one segment, so a quote and the
- * final fare agree whenever the pool does not change during the trip.
+ * final fare agree whenever the pool does not change during the trip: tripCost / n + 20.
  */
 export function pooledFare(pickup: string, dropoff: string, seatCount: number, poolSize: number, allowSharing = true): number {
   return segmentFare({ points: [{ zone: pickup, passengerCount: poolSize }], exitZone: dropoff, seatCount, allowSharing }).fare;
@@ -235,8 +228,6 @@ export function calculateEstimatedFare(pickup: string, dropoff: string, seatCoun
 export interface FareTier {
   /** Passengers in the pool, including this one */
   passengers: number;
-  /** Percentage of the distance charge each of them pays */
-  ratePercent: number;
   /** What this passenger pays (whole taka) */
   fare: number;
 }
@@ -246,7 +237,7 @@ export interface FareTier {
  *
  *   baseFare = their own full fare; a private ride always costs exactly this
  *   fare     = same as baseFare (nobody has joined yet)
- *   tiers    = the price with 2, 3 … passengers; empty for a private ride
+ *   tiers    = the price with 2, 3 … passengers (tripCost / n + 20); empty for a private ride
  *              (never pooled) or a booking that fills the whole car
  *   poolFare = the first tier (price once one other person joins); null when there are no tiers
  *
@@ -261,15 +252,11 @@ export function estimateFare(
 ): { baseFare: number; fare: number; poolFare: number | null; tiers: FareTier[] } {
   const baseFare = calculateBaseFare(pickup, dropoff, seatCount);
   // Other passengers can only join while seats remain in the largest (3-seat) car.
-  const maxPassengers = Math.min(MAX_RATE_TIER, MAX_SEATS_PER_RIDE - seatCount + 1);
+  const maxPassengers = Math.min(MAX_QUOTED_POOL_SIZE, MAX_SEATS_PER_RIDE - seatCount + 1);
   const tiers: FareTier[] = [];
   if (allowSharing) {
     for (let passengers = 2; passengers <= maxPassengers; passengers++) {
-      tiers.push({
-        passengers,
-        ratePercent: shareRatePercent(passengers),
-        fare: pooledFare(pickup, dropoff, seatCount, passengers),
-      });
+      tiers.push({ passengers, fare: pooledFare(pickup, dropoff, seatCount, passengers) });
     }
   }
   return { baseFare, fare: baseFare, poolFare: tiers[0]?.fare ?? null, tiers };
