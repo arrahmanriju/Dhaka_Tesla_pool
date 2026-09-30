@@ -74,8 +74,9 @@ describe('Ride Request API and Logic', () => {
 
   describe('Fares', () => {
     it('stores the full solo fare at creation; the pool discount only applies once someone joins', async () => {
-      // Base fare: 100 + distanceKm * 20 * seats (whole taka). Once 2+ passengers share, each pays
-      // 70% (2) or 55% (3) of their own base fare, rounded to the nearest ৳5.
+      // Solo fare: 100 + distanceKm * 20 * seats (whole taka). When 2+ passengers share the car, the ৳100
+      // base fare is still charged in full and only the distance charge is discounted: 70% of it with 2
+      // on board, 55% with 3, rounded to the nearest ৳5 (see segmentFares.test.ts for the full model).
       // Gulshan -> Banani is 2 km.
       // Solo, 1 seat: 100 + 2 * 20 * 1 = ৳140.
       const p1 = (await User.create({ name: 'Nusrat', email: 'nusrat@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
@@ -86,6 +87,24 @@ describe('Ride Request API and Logic', () => {
       const p2 = (await User.create({ name: 'Rafiq', email: 'rafiq@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
       const res2 = await request(app).post('/ride-requests').set(asUser(p2.id)).send({ pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 3 });
       expect(res2.body.rideRequest.estimatedFare).toBe(220);
+    });
+  });
+
+  describe('Fares once a second passenger is matched', () => {
+    it('quotes both the shared rate: 100 + 40 × 70% = 128 → ৳130 each (the ৳100 base is not discounted)', async () => {
+      const driver = (await User.create({ name: 'D', email: 'dq@test.com', password: 'pwd', role: 'DRIVER' })).toJSON() as any;
+      await Vehicle.create({ driverId: driver.id, modelName: 'Car', seatCapacity: 4, licensePlate: 'CAR-Q1' });
+      const a = (await User.create({ name: 'A', email: 'aq@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
+      const b = (await User.create({ name: 'B', email: 'bq@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
+      const ra = (await request(app).post('/ride-requests').set(asUser(a.id)).send({ pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1 })).body.rideRequest.id;
+      const rb = (await request(app).post('/ride-requests').set(asUser(b.id)).send({ pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1 })).body.rideRequest.id;
+      await request(app).post(`/ride-requests/${ra}/accept`).send({ driverId: driver.id });
+      await request(app).post(`/ride-requests/${rb}/accept`).send({ driverId: driver.id });
+
+      for (const id of [ra, rb]) {
+        const r = (await request(app).get(`/passenger/rides/${id === ra ? ra : rb}`).set(asUser(id === ra ? a.id : b.id))).body.ride;
+        expect(r).toMatchObject({ baseFare: 140, estimatedFare: 130, poolDiscount: 10, fareFinal: false });
+      }
     });
   });
 

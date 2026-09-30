@@ -126,7 +126,7 @@ describe('Simulated payments — cash and TeslaPay wallet', () => {
       expect(ledger[0]).toMatchObject({ rideRequestId: n, type: 'DEBIT', amount: 380, balanceAfter: 620 });
     });
 
-    it('debits the pro-rated part-trip fare on CANCELLED_IN_TRANSIT: ৳350', async () => {
+    it('debits the segment fare for the part travelled on CANCELLED_IN_TRANSIT: ৳350', async () => {
       const { n } = await nusratWalletRafiqCash();
       const res = await leave(n, nusrat, 'Mohammadpur');
 
@@ -308,6 +308,62 @@ describe('Simulated payments — cash and TeslaPay wallet', () => {
       const blob = JSON.stringify([completed.body, active.body, history.body, pool.body, timeline.body, pending.body]);
       expect(blob).not.toMatch(/walletBalance|"balance"|balanceAfter|"wallet":\{/);
       expect(blob).not.toContain('"1000"');
+    });
+  });
+
+  // ─────────────────────────── edge cases ───────────────────────────
+  describe('when nothing should be charged, or only once', () => {
+    const MOHAKHALI_TO_BADDA: Trip = { pickupZone: 'Mohakhali', destinationZone: 'Badda' };
+
+    it('a ride cancelled before it starts (by the passenger or the driver) is never charged', async () => {
+      const a = await join(nusrat, MOHAKHALI_TO_BADDA, 'wallet');
+      expect((await request(app).patch(`/passenger/rides/${a}/cancel`).set(asUser(nusrat.id)).send({})).status).toBe(200);
+      const b = await join(rafiq, MOHAKHALI_TO_BADDA, 'wallet');
+      expect((await request(app).patch(`/driver/rides/${b}/cancel`).send({ driverId: jashim.id })).status).toBe(200);
+      const c = (await requestRide(shirin, MOHAKHALI_TO_BADDA, 'wallet')).body.rideRequest.id; // never accepted
+      expect((await request(app).patch(`/passenger/rides/${c}/cancel`).set(asUser(shirin.id)).send({})).status).toBe(200);
+
+      for (const id of [a, b, c]) expect(await ride(id)).toMatchObject({ status: 'CANCELLED', paymentStatus: 'NOT_DUE', paymentAmount: null });
+      expect([await balance(nusrat), await balance(rafiq), await balance(shirin)]).toEqual([1000, 500, 120]);
+      expect(await WalletTransaction.count()).toBe(0);
+    });
+
+    it('completing twice at the same moment debits once', async () => {
+      const id = await join(nusrat, MOHAKHALI_TO_BADDA, 'wallet');
+      await start(id);
+      const results = await Promise.all([driverAction(id, 'complete'), driverAction(id, 'complete')]);
+      expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
+      expect(await balance(nusrat)).toBe(1000 - 180);
+      expect(await WalletTransaction.count({ where: { rideRequestId: id } })).toBe(1);
+    });
+
+    it('two rides in a row debit cumulatively, each ledger row showing the balance it left', async () => {
+      for (let i = 0; i < 2; i++) {
+        const id = await join(nusrat, MOHAKHALI_TO_BADDA, 'wallet');
+        await start(id);
+        await driverAction(id, 'complete');
+      }
+      expect(await balance(nusrat)).toBe(1000 - 180 - 180); // each ride is alone on board: ৳180
+      const ledger = await WalletTransaction.findAll({ where: { userId: nusrat.id }, order: [['id', 'ASC']] });
+      expect(ledger.map((l) => [l.amount, l.balanceAfter])).toEqual([[180, 820], [180, 640]]);
+    });
+
+    it('the payment shows on the passenger’s history and on the driver’s active list', async () => {
+      const id = await join(nusrat, MOHAKHALI_TO_BADDA, 'wallet');
+      await start(id);
+      const active = await request(app).get(`/driver/rides/active?driverId=${jashim.id}`);
+      expect(active.body.rides[0]).toMatchObject({ paymentMethod: 'wallet', paymentStatus: 'NOT_DUE' });
+      await driverAction(id, 'complete');
+
+      const history = await request(app).get('/passenger/rides/history').set(asUser(nusrat.id));
+      expect(history.body.rides[0]).toMatchObject({ paymentMethod: 'wallet', paymentStatus: 'PAID', paymentAmount: 180, estimatedFare: 180 });
+    });
+
+    it('the driver sees a pending request’s payment method but never a balance', async () => {
+      await requestRide(nusrat, MOHAKHALI_TO_BADDA, 'wallet');
+      const pending = await request(app).get(`/ride-requests/pending?driverId=${jashim.id}`);
+      expect(pending.body.requests[0]).toMatchObject({ paymentMethod: 'wallet', paymentStatus: 'NOT_DUE' });
+      expect(JSON.stringify(pending.body)).not.toMatch(/walletBalance|balance/i);
     });
   });
 

@@ -398,6 +398,11 @@ describe('Pooling — all cases A–J', () => {
     const p2Still = await RideRequest.findByPk(r2.body.rideRequest.id);
     expect((p1Final as any).status).toBe('COMPLETED');
     expect((p2Still as any).status).toBe('MATCHED'); // unaffected
+    // P1 was quoted the shared rate while P2 was matched (৳130), but the FINAL fare is settled from who was
+    // actually on board: P1 rode the whole way alone, so 100 + 40 (2 km × ৳20) at 100% = ৳140, no discount.
+    expect((p1Final as any).estimatedFare).toBe(140);
+    expect((p1Final as any).poolDiscount).toBe(0);
+    expect((p1Final as any).paymentStatus).toBe('CASH_DUE');
 
     // P1 appears in history
     const historyRes = await request(app)
