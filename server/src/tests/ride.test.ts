@@ -97,13 +97,13 @@ describe('Ride Request API and Logic', () => {
       const resReq = await request(app).post('/ride-requests').set(asUser(p1.id)).send({ pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1 });
       const p1RideId = resReq.body.rideRequest.id;
 
-      const resView = await request(app).get(`/passenger/rides/${p1RideId}?passengerId=${p2.id}`);
-      expect(resView.status).toBe(404);
+      const resView = await request(app).get(`/passenger/rides/${p1RideId}`).set(asUser(p2.id));
+      expect(resView.status).toBe(403);
 
-      const resCancel = await request(app).patch(`/passenger/rides/${p1RideId}/cancel`).send({
+      const resCancel = await request(app).patch(`/passenger/rides/${p1RideId}/cancel`).set(asUser(p2.id)).send({
         passengerId: p2.id
       });
-      expect(resCancel.status).toBe(404);
+      expect(resCancel.status).toBe(403);
     });
   });
 
@@ -113,7 +113,7 @@ describe('Ride Request API and Logic', () => {
       const resReq = await request(app).post('/ride-requests').set(asUser(p1.id)).send({ pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1 });
       const rideId = resReq.body.rideRequest.id;
 
-      const resCancel = await request(app).patch(`/passenger/rides/${rideId}/cancel`).send({
+      const resCancel = await request(app).patch(`/passenger/rides/${rideId}/cancel`).set(asUser(p1.id)).send({
         passengerId: p1.id
       });
       expect(resCancel.status).toBe(200);
@@ -130,7 +130,7 @@ describe('Ride Request API and Logic', () => {
       await request(app).post(`/ride-requests/${rideId}/accept`).send({ driverId: d1.id });
       await request(app).patch(`/driver/rides/${rideId}/arrive`).send({ driverId: d1.id });
 
-      const resCancel = await request(app).patch(`/passenger/rides/${rideId}/cancel`).send({
+      const resCancel = await request(app).patch(`/passenger/rides/${rideId}/cancel`).set(asUser(p1.id)).send({
         passengerId: p1.id
       });
       expect(resCancel.status).toBe(409); // Cannot cancel

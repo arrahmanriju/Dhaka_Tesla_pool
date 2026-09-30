@@ -231,7 +231,7 @@ describe('Request ride', () => {
     it('allows a new request after the passenger cancels through the API', async () => {
       const first = await requestRide(nusrat, NUSRAT_RIDE);
       const cancel = await request(app)
-        .patch(`/passenger/rides/${first.body.rideRequest.id}/cancel`)
+        .patch(`/passenger/rides/${first.body.rideRequest.id}/cancel`).set(asUser(nusrat.id))
         .send({ passengerId: nusrat.id });
       expect(cancel.status).toBe(200);
       expect((await requestRide(nusrat, NUSRAT_RIDE)).status).toBe(201);
@@ -314,7 +314,7 @@ describe('Request ride', () => {
   describe('the ride shows up on the passenger status endpoints', () => {
     it('is returned by the active-rides endpoint with allowSharing', async () => {
       const created = await requestRide(nusrat, { ...NUSRAT_RIDE, allowSharing: false });
-      const res = await request(app).get(`/passenger/rides/active?passengerId=${nusrat.id}`);
+      const res = await request(app).get('/passenger/rides/active').set(asUser(nusrat.id));
       expect(res.status).toBe(200);
       expect(res.body.rides).toHaveLength(1);
       expect(res.body.rides[0]).toMatchObject({ id: created.body.rideRequest.id, status: 'REQUESTED', allowSharing: false });

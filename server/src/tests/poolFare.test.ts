@@ -165,9 +165,9 @@ const accept = (rideId: string) => request(app).post(`/ride-requests/${rideId}/a
 const driverAction = (rideId: string, action: 'arrive' | 'start' | 'complete' | 'cancel') =>
   request(app).patch(`/driver/rides/${rideId}/${action}`).send({ driverId: jashim.id });
 const passengerCancel = (rideId: string, passenger: any) =>
-  request(app).patch(`/passenger/rides/${rideId}/cancel`).send({ passengerId: passenger.id });
+  request(app).patch(`/passenger/rides/${rideId}/cancel`).set(asUser(passenger.id)).send({ passengerId: passenger.id });
 const driverActive = () => request(app).get(`/driver/rides/active?driverId=${jashim.id}`);
-const passengerActive = (passenger: any) => request(app).get(`/passenger/rides/active?passengerId=${passenger.id}`);
+const passengerActive = (passenger: any) => request(app).get('/passenger/rides/active').set(asUser(passenger.id));
 const fareOf = async (rideId: string) => (await RideRequest.findByPk(rideId))!.estimatedFare;
 
 /** Requests a ride for `passenger` and has Jashim accept it. Returns the ride id. */
@@ -231,8 +231,10 @@ describe('Pool fare split — Nusrat, Rafiq, Shirin and Jashim (Bullet)', () => 
       await joinPool(nusrat);
       await joinPool(rafiq);
       const body = JSON.stringify((await passengerActive(nusrat)).body);
+      // Only the co-passenger's FIRST NAME is shown (see rideStatus.test.ts): no id, phone or fare of theirs.
       expect(body).not.toContain(rafiq.id);
-      expect(body).not.toContain('Rafiq');
+      expect(body).not.toContain(rafiq.phone);
+      expect((await passengerActive(nusrat)).body.rides[0].pool.otherPassengers).toEqual([{ firstName: 'Rafiq' }]);
     });
   });
 

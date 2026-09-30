@@ -1,6 +1,7 @@
-import { Router, Request, Response } from 'express';
+import { Router, Response, NextFunction } from 'express';
 import { Op } from 'sequelize';
-import { User, RideRequest, Vehicle } from '../models';
+import { User, RideRequest, Vehicle, DriverProfile } from '../models';
+import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 import { validateTransition, RideStatus } from '../models/RideRequest';
 import { isFareLocked, recalculatePoolFares } from '../utils/poolFares';
 import { shareRatePercent } from '../utils/fareCalculator';
@@ -50,11 +51,34 @@ async function resolvePassenger(passengerId: string | undefined, res: Response) 
 }
 
 // ---------------------------------------------------------------------------
+// Every /passenger/rides route runs as the LOGGED-IN passenger.
+//
+// The caller is identified by their login token, never by an id they send. A `passengerId`
+// in the query or body is still accepted (older clients send one) but it must be the caller's
+// own id: someone else's id gets a 403. Only passengers may use these routes.
+//
+// This matters more now that a ride carries the driver's phone number and the first names of
+// the other passengers: an id that can be forged would leak them.
+// ---------------------------------------------------------------------------
+function ownPassenger(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
+  authenticateToken(req, res, () => {
+    if (req.user!.role !== 'PASSENGER') {
+      res.status(403).json({ error: 'Only passengers can view or change rides.' });
+      return;
+    }
+    const claimed = req.query.passengerId ?? req.body?.passengerId;
+    if (typeof claimed === 'string' && claimed !== req.user!.id) {
+      res.status(403).json({ error: 'You can only access your own rides.' });
+      return;
+    }
+    next();
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Helper: find a ride and enforce ownership.
-// Returns the ride if it belongs to this passenger; otherwise writes a 403/404
-// and returns null. Using a generic 404 for non-owned rides prevents
-// information leakage (passenger cannot confirm whether a ride ID even exists
-// if it belongs to someone else).
+// Returns the ride if it belongs to this passenger; otherwise writes the error
+// (404 if there is no such ride, 403 if it is someone else's) and returns null.
 // ---------------------------------------------------------------------------
 async function findOwnedRide(rideId: string, passengerId: string, res: Response) {
   const ride = await RideRequest.findOne({ where: { id: rideId } });
@@ -64,9 +88,8 @@ async function findOwnedRide(rideId: string, passengerId: string, res: Response)
     return null;
   }
 
-  // Ownership check — deliberately returns the same 404 to avoid enumeration
   if ((ride as any).passengerId !== passengerId) {
-    res.status(404).json({ error: 'Ride not found.' });
+    res.status(403).json({ error: 'This ride belongs to another passenger.' });
     return null;
   }
 
@@ -74,38 +97,85 @@ async function findOwnedRide(rideId: string, passengerId: string, res: Response)
 }
 
 // ---------------------------------------------------------------------------
-// Helper: enrich a RideRequest with vehicle, driver name, and pool info.
-// Returns ONLY the requesting passenger's own data — no co-passenger PII.
+// Helper: enrich a RideRequest with the driver, vehicle and pool details the passenger's
+// ride status page shows.
+//
+// What a passenger may see (and nothing more):
+//   driver   — name, photo, Tesla ID, and the PHONE NUMBER only while the ride is in progress
+//              (MATCHED, DRIVER_ARRIVED, STARTED). Never while it is still REQUESTED, and
+//              not once it is over.
+//   pool     — is it shared, seats taken, and the FIRST NAME of each other passenger.
+//              Never another passenger's phone, fare, destination, surname or ids.
+//   fare     — this passenger's own fare only.
 // ---------------------------------------------------------------------------
+const IN_PROGRESS: RideStatus[] = ['MATCHED', 'DRIVER_ARRIVED', 'STARTED'];
+const OPEN: RideStatus[] = ['REQUESTED', 'MATCHED', 'DRIVER_ARRIVED', 'STARTED'];
+
+const firstName = (fullName: string | null | undefined) => (fullName ?? '').trim().split(/\s+/)[0] ?? '';
+
 async function enrichRide(ride: any) {
-  let vehicleInfo = null;
-  let driverName: string | null = null;
-  let coPassengers = 0;
-  let poolSize = 1;
+  const status = ride.status as RideStatus;
+  const vehicle: any = ride.vehicleId
+    ? await Vehicle.findByPk(ride.vehicleId, {
+        attributes: ['id', 'modelName', 'licensePlate', 'seatCapacity', 'occupiedSeats'],
+      })
+    : null;
 
-  if (ride.vehicleId) {
-    const vehicle: any = await Vehicle.findByPk(ride.vehicleId, {
-      attributes: ['id', 'modelName', 'licensePlate', 'seatCapacity', 'occupiedSeats'],
-    });
-    vehicleInfo = vehicle ? vehicle.toJSON() : null;
-
-    // Count co-passengers (excluding this passenger) — count only, no PII
-    const poolCount = await RideRequest.count({
-      where: {
-        vehicleId: ride.vehicleId,
-        status: { [Op.notIn]: ['CANCELLED', 'COMPLETED'] },
-      },
-    });
-    poolSize = Math.max(1, poolCount);
-    coPassengers = poolSize - 1;
+  // ── Driver: only once a driver has accepted (never while REQUESTED) ──
+  let driver: { name: string | null; phone: string | null; photoUrl: string | null; teslaId: string | null } | null = null;
+  if (ride.driverId && status !== 'REQUESTED') {
+    const [user, profile] = await Promise.all([
+      User.findByPk(ride.driverId, { attributes: ['name', 'phone'] }),
+      DriverProfile.findOne({ where: { userId: ride.driverId }, attributes: ['id', 'profilePicture'] }),
+    ]);
+    driver = {
+      name: user?.name ?? null,
+      phone: IN_PROGRESS.includes(status) ? (user?.phone ?? null) : null,
+      photoUrl: profile?.profilePicture ? `/uploads/${profile.profilePicture}` : null,
+      teslaId: profile?.driverCode ?? null,
+    };
   }
 
-  if (ride.driverId) {
-    const driver: any = await User.findByPk(ride.driverId, {
-      attributes: ['name'],
+  const vehicleInfo = vehicle
+    ? {
+        ...vehicle.toJSON(),
+        nickname: vehicle.modelName,
+        teslaId: driver?.teslaId ?? vehicle.licensePlate,
+      }
+    : null;
+
+  // ── Pool: who else is on this vehicle right now (only while the ride is open) ──
+  let pool: {
+    isShared: boolean;
+    poolSize: number;
+    otherPassengers: { firstName: string }[];
+    seatsTaken: number;
+    seatCapacity: number;
+  } | null = null;
+  if (ride.vehicleId && vehicle && OPEN.includes(status)) {
+    // Only the columns needed to count seats and find names — no fares, zones or phones are read.
+    const poolRides: any[] = await RideRequest.findAll({
+      where: { vehicleId: ride.vehicleId, status: { [Op.in]: OPEN } },
+      attributes: ['id', 'passengerId', 'seatCount'],
+      order: [['createdAt', 'ASC']],
     });
-    driverName = driver?.name ?? null;
+    const others = poolRides.filter((r) => r.id !== ride.id);
+    const users: any[] = others.length
+      ? await User.findAll({ where: { id: others.map((r) => r.passengerId) }, attributes: ['id', 'name'] })
+      : [];
+    const names = new Map(users.map((u) => [u.id, firstName(u.name)]));
+    pool = {
+      isShared: others.length > 0,
+      poolSize: Math.max(1, poolRides.length),
+      otherPassengers: others.map((r) => ({ firstName: names.get(r.passengerId) ?? '' })),
+      seatsTaken: poolRides.reduce((sum, r) => sum + r.seatCount, 0),
+      seatCapacity: vehicle.seatCapacity,
+    };
   }
+
+  const poolSize = pool?.poolSize ?? 1;
+  const coPassengers = pool ? pool.otherPassengers.length : 0;
+  const driverName = driver?.name ?? null;
 
   return {
     id: ride.id,
@@ -121,7 +191,9 @@ async function enrichRide(ride: any) {
     fareLocked: isFareLocked(ride.status), // true once the trip has started
     status: ride.status,
     vehicle: vehicleInfo,
+    driver,
     driverName,
+    pool,
     coPassengers,
     poolSize,
     shareRatePercent: shareRatePercent(poolSize, ride.allowSharing),
@@ -134,15 +206,14 @@ async function enrichRide(ride: any) {
 }
 
 // ---------------------------------------------------------------------------
-// GET /passenger/rides/active?passengerId=...
-// Passenger tracks live status of their current (non-terminal) ride(s).
-// Returns the ride status, vehicle info, driver name, pool co-passenger count,
-// fare (with discount if pool applies), and "shared ride" flag.
-// Does NOT reveal other passengers' fares or PII.
+// GET /passenger/rides/active   (login required)
+// Passenger tracks live status of their current (non-terminal) ride(s): status, driver and
+// vehicle, pool (shared or not, seats, first names of the others), and their own fare.
+// Does NOT reveal other passengers' phones, fares, destinations or ids.
 // ---------------------------------------------------------------------------
-router.get('/rides/active', async (req: Request, res: Response) => {
+router.get('/rides/active', ownPassenger, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const passengerId = req.query.passengerId as string;
+    const passengerId = req.user!.id;
     const passenger = await resolvePassenger(passengerId, res);
     if (!passenger) return;
 
@@ -163,12 +234,12 @@ router.get('/rides/active', async (req: Request, res: Response) => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /passenger/rides/history?passengerId=...
+// GET /passenger/rides/history   (login required)
 // Passenger views their completed and cancelled ride history.
 // ---------------------------------------------------------------------------
-router.get('/rides/history', async (req: Request, res: Response) => {
+router.get('/rides/history', ownPassenger, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const passengerId = req.query.passengerId as string;
+    const passengerId = req.user!.id;
     const passenger = await resolvePassenger(passengerId, res);
     if (!passenger) return;
 
@@ -203,13 +274,13 @@ router.get('/rides/history', async (req: Request, res: Response) => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /passenger/rides/:id?passengerId=...
-// Passenger tracks one specific ride by ID.
-// A 404 is returned if the ride doesn't exist OR belongs to another passenger.
+// GET /passenger/rides/:id   (login required)
+// Passenger tracks one specific ride by ID — the ride status page polls this every 5 seconds.
+// 404 if there is no such ride; 403 if it belongs to another passenger.
 // ---------------------------------------------------------------------------
-router.get('/rides/:id', async (req: Request, res: Response) => {
+router.get('/rides/:id', ownPassenger, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const passengerId = req.query.passengerId as string;
+    const passengerId = req.user!.id;
     const rideId = req.params.id as string;
 
     const passenger = await resolvePassenger(passengerId, res);
@@ -226,20 +297,20 @@ router.get('/rides/:id', async (req: Request, res: Response) => {
 });
 
 // ---------------------------------------------------------------------------
-// PATCH /passenger/rides/:id/cancel
+// PATCH /passenger/rides/:id/cancel   (login required)
 // Passenger cancels their own ride.
 // Only allowed in REQUESTED or MATCHED states (see rationale at top of file).
-// A 404 is returned for rides belonging to other passengers (no enumeration).
+// 404 if there is no such ride; 403 for a ride that belongs to another passenger.
 //
 // POOL FARE RECALCULATION:
 //   If the cancelled ride was part of a pool (vehicleId set), we release its
 //   seats and immediately recalculate the remaining pool passengers' fares.
 //   If only 1 passenger remains, their discount is removed (back to baseFare).
 // ---------------------------------------------------------------------------
-router.patch('/rides/:id/cancel', async (req: Request, res: Response) => {
+router.patch('/rides/:id/cancel', ownPassenger, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const rideId = req.params.id as string;
-    const { passengerId } = req.body;
+    const passengerId = req.user!.id;
 
     const passenger = await resolvePassenger(passengerId, res);
     if (!passenger) return;

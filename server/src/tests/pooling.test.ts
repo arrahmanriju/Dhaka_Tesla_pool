@@ -125,7 +125,7 @@ describe('Pooling — all cases A–J', () => {
 
     // Passenger view should show shared ride badge and co-passengers
     const activeRes = await request(app)
-      .get(`/passenger/rides/active?passengerId=${p1.id}`);
+      .get('/passenger/rides/active').set(asUser(p1.id));
     expect(activeRes.status).toBe(200);
     const activeRide = activeRes.body.rides[0];
     expect(activeRide.isSharedRide).toBe(true);
@@ -212,7 +212,7 @@ describe('Pooling — all cases A–J', () => {
 
     // P1 cancels
     const cancelRes = await request(app)
-      .patch(`/passenger/rides/${r1.body.rideRequest.id}/cancel`)
+      .patch(`/passenger/rides/${r1.body.rideRequest.id}/cancel`).set(asUser(p1.id))
       .send({ passengerId: p1.id });
     expect(cancelRes.status).toBe(200);
 
@@ -243,7 +243,7 @@ describe('Pooling — all cases A–J', () => {
 
     // P2 cancels
     const cancelRes = await request(app)
-      .patch(`/passenger/rides/${r2.body.rideRequest.id}/cancel`)
+      .patch(`/passenger/rides/${r2.body.rideRequest.id}/cancel`).set(asUser(p2.id))
       .send({ passengerId: p2.id });
     expect(cancelRes.status).toBe(200);
 
@@ -320,14 +320,14 @@ describe('Pooling — all cases A–J', () => {
 
     // P2 tries to view P1's ride
     const viewRes = await request(app)
-      .get(`/passenger/rides/${rideId}?passengerId=${p2.id}`);
-    expect(viewRes.status).toBe(404);
+      .get(`/passenger/rides/${rideId}`).set(asUser(p2.id));
+    expect(viewRes.status).toBe(403);
 
     // P2 tries to cancel P1's ride
     const cancelRes = await request(app)
-      .patch(`/passenger/rides/${rideId}/cancel`)
+      .patch(`/passenger/rides/${rideId}/cancel`).set(asUser(p2.id))
       .send({ passengerId: p2.id });
-    expect(cancelRes.status).toBe(404);
+    expect(cancelRes.status).toBe(403);
   });
 
   it('H: driver cannot act on a pool that is not theirs', async () => {
@@ -395,14 +395,14 @@ describe('Pooling — all cases A–J', () => {
 
     // P1 appears in history
     const historyRes = await request(app)
-      .get(`/passenger/rides/history?passengerId=${p1.id}`);
+      .get('/passenger/rides/history').set(asUser(p1.id));
     expect(historyRes.status).toBe(200);
     expect(historyRes.body.rides).toHaveLength(1);
     expect(historyRes.body.rides[0].status).toBe('COMPLETED');
 
     // P2 still appears in active rides
     const activeRes = await request(app)
-      .get(`/passenger/rides/active?passengerId=${p2.id}`);
+      .get('/passenger/rides/active').set(asUser(p2.id));
     expect(activeRes.status).toBe(200);
     expect(activeRes.body.rides).toHaveLength(1);
   });
