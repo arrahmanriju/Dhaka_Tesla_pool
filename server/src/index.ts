@@ -9,7 +9,7 @@ import passengerRoutes from './routes/passenger';
 import { sequelize, storagePath } from './models';
 import { UPLOADS_DIR } from './utils/onboarding';
 import onboardingRoutes from './routes/onboarding';
-import { migrateUsersTable, migrateRideRequestsTable, migrateFaresToTaka, ensureOneActiveRideIndex } from './migrations';
+import { migrateUsersTable, migrateRideRequestsTable, migrateFaresToTaka, migrateMidTripCancellation, ensureOneActiveRideIndex } from './migrations';
 
 dotenv.config();
 
@@ -61,6 +61,7 @@ if (require.main === module) {
     .then(() => migrateRideRequestsTable())
     .then(() => migrateFaresToTaka())
     .then(() => sequelize.sync())
+    .then(() => migrateMidTripCancellation())
     .then(() => ensureOneActiveRideIndex())
     .then(() => {
       console.log('Database synced');

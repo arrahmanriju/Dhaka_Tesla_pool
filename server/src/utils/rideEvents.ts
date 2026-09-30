@@ -11,7 +11,8 @@ export async function recordRideEvent(
   status: RideStatus,
   fromStatus: RideStatus | null,
   actor: { id: string; role: 'PASSENGER' | 'DRIVER' } | null,
-  transaction: Transaction | null = null
+  transaction: Transaction | null = null,
+  details: { cancellationZone?: string; chargedFare?: number; lockedFare?: number } = {}
 ): Promise<void> {
   let poolSize = 0;
   let ridersOnboard = 0;
@@ -36,6 +37,9 @@ export async function recordRideEvent(
       actorRole: actor?.role ?? null,
       poolSize,
       ridersOnboard,
+      cancellationZone: details.cancellationZone ?? null,
+      chargedFare: details.chargedFare ?? null,
+      lockedFare: details.lockedFare ?? null,
     },
     { transaction }
   );

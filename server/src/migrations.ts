@@ -158,3 +158,22 @@ export async function migrateFaresToTaka(): Promise<void> {
   for (const { vehicleId } of pools) await recalculatePoolFares(vehicleId);
   console.log(`[migrate] RideRequests: fares converted to whole taka (${pools.length} open pool(s) re-priced)`);
 }
+
+/**
+ * Idempotent: adds the columns behind mid-trip cancellation to a database created before it existed:
+ * `RideRequests.cancellationZone` and `RideEvents.cancellationZone / chargedFare / lockedFare`.
+ * `sequelize.sync()` never adds columns to an existing table. (The status column is plain TEXT in
+ * SQLite, so the new CANCELLED_IN_TRANSIT value needs no change.)
+ */
+export async function migrateMidTripCancellation(): Promise<void> {
+  const add = async (table: string, column: string, type: string) => {
+    const [cols] = (await sequelize.query(`PRAGMA table_info(\`${table}\`)`)) as [{ name: string }[], unknown];
+    if (cols.length === 0 || cols.some((c) => c.name === column)) return; // fresh database, or already done
+    await sequelize.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${type}`);
+    console.log(`[migrate] ${table}: added ${column} column`);
+  };
+  await add('RideRequests', 'cancellationZone', 'TEXT');
+  await add('RideEvents', 'cancellationZone', 'VARCHAR(255)');
+  await add('RideEvents', 'chargedFare', 'INTEGER');
+  await add('RideEvents', 'lockedFare', 'INTEGER');
+}

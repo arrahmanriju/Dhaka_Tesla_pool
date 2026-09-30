@@ -1,10 +1,10 @@
 import { Router, Response, NextFunction } from 'express';
-import { Op } from 'sequelize';
+import { Op, Transaction } from 'sequelize';
 import { sequelize, User, RideRequest, Vehicle, DriverProfile, RideEvent } from '../models';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
-import { validateTransition, RideStatus } from '../models/RideRequest';
+import { validateTransition, RideStatus, DHAKA_ZONES } from '../models/RideRequest';
 import { isFareLocked, recalculatePoolFares } from '../utils/poolFares';
-import { shareRatePercent } from '../utils/fareCalculator';
+import { prorateFare, shareRatePercent } from '../utils/fareCalculator';
 import { recordRideEvent, joinedMidTrip } from '../utils/rideEvents';
 
 const router = Router();
@@ -133,6 +133,9 @@ async function timelineFor(rideIds: string[], passengerId: string) {
       status: e.status,
       at: e.createdAt,
       ...(e.status === 'MATCHED' ? { ridersOnboard: e.ridersOnboard, joinedMidTrip: joinedMidTrip(e) } : {}),
+      ...(e.status === 'CANCELLED_IN_TRANSIT'
+        ? { cancellationZone: e.cancellationZone, chargedFare: e.chargedFare, lockedFare: e.lockedFare }
+        : {}),
     });
     byRide.set(e.rideRequestId, list);
   }
@@ -226,6 +229,9 @@ async function enrichRide(ride: any, timeline: any[] = []) {
     poolDiscountApplied: ride.poolDiscount > 0,
     isSharedRide: coPassengers > 0,
     canCancel: PASSENGER_CANCELLABLE.includes(ride.status as RideStatus),
+    // a STARTED ride can still be left mid-route (PATCH /passenger/rides/:id/cancel-in-transit)
+    canCancelInTransit: ride.status === 'STARTED',
+    cancellationZone: ride.cancellationZone ?? null,
     timeline,
     joinedMidTrip: timeline.some((e) => e.joinedMidTrip === true),
     createdAt: ride.createdAt,
@@ -285,6 +291,7 @@ router.get('/rides/history', ownPassenger, async (req: AuthenticatedRequest, res
       rides: history.map((r: any) => ({
         id: r.id,
         timeline: timelines.get(r.id) ?? [],
+        cancellationZone: r.cancellationZone ?? null,
         pickupZone: r.pickupZone,
         destinationZone: r.destinationZone,
         seatCount: r.seatCount,
@@ -395,6 +402,116 @@ router.patch('/rides/:id/cancel', ownPassenger, async (req: AuthenticatedRequest
     });
   } catch (error) {
     console.error('Passenger cancel ride error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PATCH /passenger/rides/:id/cancel-in-transit   (login required)   body: { cancellationZone }
+//
+// A passenger leaves a ride that has already STARTED. They were picked up and travelled part of the
+// route, so the ride ends as CANCELLED_IN_TRANSIT (not CANCELLED, which means "never happened").
+//
+//   • cancellationZone is required: the nearest predefined zone where they are dropped off (same
+//     zone list as everywhere else). It must differ from the pickup zone, and from the destination
+//     zone (a passenger who reaches their destination completes the trip instead).
+//   • The fare is pro-rated with the original fare formula, from pickup → cancellationZone:
+//       fare = ৳100 + distanceCharge − poolDiscount   (see prorateFare in utils/fareCalculator.ts)
+//     with the poolDiscount as quoted at match time. The ride's `estimatedFare` becomes that charge.
+//   • The seat is released at once, so the vehicle is eligible again for the pending-request
+//     filter without a re-match.
+//   • 404 no such ride · 403 someone else's ride · 409 the ride is not STARTED (including COMPLETED).
+//
+// ASSUMPTION — nobody else's fare changes. Passengers still on the vehicle keep exactly what was
+// locked for them (a STARTED fare is final, README "Fare Model"). We also do NOT re-price
+// co-passengers who have not started yet: a co-passenger leaving mid-route must not
+// retroactively change what anyone else owes. (They are re-priced only by the ordinary pool
+// events: someone joining, or a pre-trip cancellation.)
+// ---------------------------------------------------------------------------
+router.patch('/rides/:id/cancel-in-transit', ownPassenger, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const rideId = req.params.id as string;
+    const passengerId = req.user!.id;
+
+    const passenger = await resolvePassenger(passengerId, res);
+    if (!passenger) return;
+
+    const ride: any = await findOwnedRide(rideId, passengerId, res);
+    if (!ride) return;
+
+    // The ride must be STARTED (a COMPLETED or already-cancelled ride can never be cancelled here)
+    const machineErr = validateTransition(ride.status as RideStatus, 'CANCELLED_IN_TRANSIT');
+    if (machineErr) {
+      res.status(409).json({
+        error: ride.status === 'COMPLETED' ? 'This ride is already completed.' : machineErr,
+        code: 'NOT_IN_TRANSIT',
+      });
+      return;
+    }
+
+    const zone = req.body?.cancellationZone;
+    if (typeof zone !== 'string' || !(DHAKA_ZONES as readonly string[]).includes(zone)) {
+      res.status(400).json({
+        error: 'Choose the zone where you are being dropped off.',
+        code: 'VALIDATION',
+        fields: { cancellationZone: 'Choose the zone where you are being dropped off.' },
+      });
+      return;
+    }
+    if (zone === ride.pickupZone || zone === ride.destinationZone) {
+      const msg = zone === ride.pickupZone
+        ? 'The drop-off zone cannot be your pickup zone.'
+        : 'That is your destination: the driver completes the trip there.';
+      res.status(400).json({ error: msg, code: 'VALIDATION', fields: { cancellationZone: msg } });
+      return;
+    }
+
+    const result = await sequelize.transaction({ type: Transaction.TYPES.IMMEDIATE }, async (t: any) => {
+      // Re-read under the write lock: the driver may have completed the ride a moment ago.
+      const current: any = await RideRequest.findOne({ where: { id: rideId, passengerId }, transaction: t });
+      if (!current || current.status !== 'STARTED') throw new Error('NOT_IN_TRANSIT');
+
+      const lockedFare: number = current.estimatedFare;
+      const bill = prorateFare(current.pickupZone, zone, current.seatCount, current.poolDiscount, lockedFare);
+
+      const [changed] = await RideRequest.update(
+        // poolDiscount and baseFare stay as quoted; estimatedFare (what they pay) becomes the pro-rated fare
+        { status: 'CANCELLED_IN_TRANSIT', cancellationZone: zone, estimatedFare: bill.fare },
+        { where: { id: rideId, passengerId, status: 'STARTED' }, transaction: t }
+      );
+      if (changed === 0) throw new Error('NOT_IN_TRANSIT');
+
+      // Release the seat immediately
+      if (current.vehicleId) {
+        await Vehicle.update(
+          { occupiedSeats: sequelize.literal(`MAX(0, occupiedSeats - ${current.seatCount})`) },
+          { where: { id: current.vehicleId }, transaction: t }
+        );
+      }
+
+      await recordRideEvent(current, 'CANCELLED_IN_TRANSIT', 'STARTED', { id: passengerId, role: 'PASSENGER' }, t, {
+        cancellationZone: zone,
+        chargedFare: bill.fare,
+        lockedFare,
+      });
+      return { bill, lockedFare };
+    });
+
+    res.json({
+      message: 'You left the ride. You will be charged for the part you travelled.',
+      rideId,
+      status: 'CANCELLED_IN_TRANSIT',
+      cancellationZone: zone,
+      fare: {
+        ...result.bill,
+        lockedFare: result.lockedFare,
+      },
+    });
+  } catch (error: any) {
+    if (error.message === 'NOT_IN_TRANSIT') {
+      return res.status(409).json({ error: 'This ride is no longer in progress.', code: 'NOT_IN_TRANSIT' });
+    }
+    console.error('Passenger cancel-in-transit error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

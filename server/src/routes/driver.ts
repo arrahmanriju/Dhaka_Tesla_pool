@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { Op } from 'sequelize';
+import { Op, Transaction } from 'sequelize';
 import { sequelize, User, Vehicle, RideRequest, DriverProfile, RideEvent } from '../models';
 import { validateTransition, RideStatus, TERMINAL_STATUSES } from '../models/RideRequest';
 import { isFareLocked, recalculatePoolFares } from '../utils/poolFares';
@@ -144,11 +144,15 @@ router.patch('/rides/:id/complete', async (req: Request, res: Response) => {
     const err = validateTransition(ride.status as RideStatus, 'COMPLETED');
     if (err) { res.status(409).json({ error: err }); return; }
 
-    await sequelize.transaction(async (t: any) => {
-      await RideRequest.update(
+    // IMMEDIATE + a conditional update: the passenger may be leaving the ride (CANCELLED_IN_TRANSIT)
+    // at this very moment. Whichever runs second finds the ride is no longer STARTED and stops, so the
+    // seat is released once and a finished ride is never overwritten.
+    await sequelize.transaction({ type: Transaction.TYPES.IMMEDIATE }, async (t: any) => {
+      const [changed] = await RideRequest.update(
         { status: 'COMPLETED' },
-        { where: { id: rideId }, transaction: t }
+        { where: { id: rideId, status: 'STARTED' }, transaction: t }
       );
+      if (changed === 0) throw new Error('NOT_STARTED');
       await recordRideEvent(ride, 'COMPLETED', ride.status, { id: driverId, role: 'DRIVER' }, t);
 
       // Free up the seats on the vehicle
@@ -161,7 +165,11 @@ router.patch('/rides/:id/complete', async (req: Request, res: Response) => {
     });
 
     res.json({ message: 'Ride completed.', rideId, status: 'COMPLETED' });
-  } catch (error) {
+  } catch (error: any) {
+    if (error.message === 'NOT_STARTED') {
+      res.status(409).json({ error: 'This ride is no longer in progress.' });
+      return;
+    }
     console.error('Complete ride error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -307,6 +315,7 @@ router.get('/rides/history', async (req: Request, res: Response) => {
         estimatedFare: r.estimatedFare,
         poolDiscount: r.poolDiscount,
         status: r.status,
+        cancellationZone: r.cancellationZone ?? null,
         vehicleId: r.vehicleId,
         createdAt: r.createdAt,
         updatedAt: r.updatedAt,
@@ -414,6 +423,9 @@ router.get('/rides/timeline', authenticateToken, async (req: AuthenticatedReques
         poolSize: e.poolSize,
         ridersOnboard: e.ridersOnboard,
         joinedMidTrip: joinedMidTrip(e),
+        ...(e.status === 'CANCELLED_IN_TRANSIT'
+          ? { cancellationZone: e.cancellationZone, chargedFare: e.chargedFare, lockedFare: e.lockedFare }
+          : {}),
       })),
     });
   } catch (error) {

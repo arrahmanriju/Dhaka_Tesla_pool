@@ -122,6 +122,9 @@ export class RideRequest extends Model {
   /** What this passenger saves by sharing (baseFare − estimatedFare) — whole taka. 0 when riding alone. */
   public poolDiscount!: number;
 
+  /** Where the passenger left the ride, when it ended CANCELLED_IN_TRANSIT. `estimatedFare` is then the pro-rated charge. */
+  public cancellationZone!: string | null;
+
   public status!: RideStatus;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
@@ -182,6 +185,10 @@ export const initRideRequest = (sequelize: any) => {
         type: DataTypes.INTEGER, // whole taka saved by sharing (baseFare − estimatedFare)
         allowNull: false,
         defaultValue: 0,
+      },
+      cancellationZone: {
+        type: DataTypes.ENUM(...DHAKA_ZONES),
+        allowNull: true,
       },
       status: {
         type: DataTypes.ENUM(...RIDE_STATUS_VALUES),
