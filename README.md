@@ -11,26 +11,47 @@ To determine whether a new ride request can be added to an existing vehicle's po
 4. The pool must not have reached the `STARTED` status (no new passengers can join once the trip begins).
 5. If the vehicle's pool is currently empty, any route is considered valid.
 
-### Fare Calculation Formula
-Fares are calculated and stored in integer paisa (BDT × 100). The formula per passenger segment is:
-`passengerFare = baseFare + distanceCharge - poolDiscount`
+### Fare Model
+Passengers who share a Tesla each pay a **smaller share of their own fare**, and the driver earns more in total. Fares are **whole taka (integers, never paisa), rounded to the nearest ৳5**.
 
-- **baseFare**: Fixed at 100 BDT per segment.
-- **distanceCharge**: `distanceKm × 20 BDT × seatCount`.
-- **poolDiscount**: Applied if and only if the pool size (total distinct passengers in the vehicle) is ≥ 2. The discount is fixed at 30 BDT per passenger.
-- **Recalculation**: When a second passenger joins the pool, the first passenger's fare is automatically recalculated and reduced by 30 BDT. If a passenger cancels, leaving someone alone in the pool, the remaining passenger's discount is removed.
+`passengerFare = baseFare × shareRate`
 
-#### Worked Example
-Consider Nusrat and Rafiq travelling from Gulshan to Banani (2 km).
-**Nusrat books alone (1 seat):**
-- `baseFare` = 100 BDT
-- `distanceCharge` = 2 km × 20 BDT × 1 = 40 BDT
-- `poolDiscount` = 0
-- **Total Fare** = 140 BDT (14,000 paisa)
+- **baseFare** is the passenger's *own* fare for their own pickup → destination when riding alone: `100 + distanceKm × 20 × seatCount`. It is set when the ride is requested and never changes. (Mohakhali → Badda is 4 km, so ৳180.)
+- **shareRate** depends on how many passengers are in the pool (including this one):
 
-**Rafiq joins the same pool (1 seat):**
-- Nusrat's fare is recalculated downward: `100 + 40 - 30` = 110 BDT (11,000 paisa)
-- Rafiq's fare: `100 + 40 - 30` = 110 BDT (11,000 paisa)
+| Passengers in the pool | Each pays | Driver earns (base ৳100) | Driver earns (base ৳180) |
+|---|---|---|---|
+| 1 | 100% | ৳100 | ৳180 |
+| 2 | 70% | ৳70 + ৳70 = **৳140** | ৳125 + ৳125 = **৳250** |
+| 3 | 55% | ৳55 × 3 = **৳165** | ৳100 × 3 = **৳300** |
+
+  (A base of ৳100 gives exactly ৳70 and ৳55. ৳180 × 70% = ৳126 → **৳125** and ৳180 × 55% = ৳99 → **৳100** after rounding to the nearest ৳5, halves round up.) A pool larger than 3 keeps the 3-passenger rate.
+- The driver's earnings for a ride are the **sum of what its passengers pay**.
+
+**Rules**
+- **Each passenger is priced from their own base fare.** Pooled passengers can have different destinations: Nusrat (Mohakhali → Badda, base ৳180) and Rafiq (Mohakhali → Gulshan, base ৳160) pay ৳125 and ৳110 when they share, and the driver earns ৳235.
+- **Everyone is re-priced whenever the pool changes**: when a passenger is accepted onto the vehicle, when a passenger cancels, and when the driver cancels a passenger. The savings are stored as `poolDiscount` (`baseFare − estimatedFare`).
+- **The fare is locked when a ride becomes `STARTED`.** Nothing that happens in the pool afterwards changes what that passenger pays (no one can join a started trip, and a later cancellation only re-prices the passengers who have not started yet). Finishing a trip does not re-price anyone.
+- **Private rides (sharing off) always pay 100%** and are never pooled.
+
+**What each side sees**
+- **Passenger** — only their own fare, e.g. `৳125 (shared, you save ৳55)`; it refreshes on its own while the ride is open and shows 🔒 *Fare locked* once the trip starts. The **Request Ride** page shows the price alone and what it drops to with 2 and 3 passengers (`GET /ride-requests/estimate` returns `baseFare`, `fare`, `poolFare` and `tiers`). A private ride, or a booking that fills the whole car, has no drop.
+- **Driver** — the **total earnings for the ride** on the Active tab (`GET /driver/rides/active` returns `poolSize` and `totalEarnings`).
+- API money fields (`baseFare`, `estimatedFare`, `poolDiscount`, `fare`, `totalEarnings`) are whole taka; rides carry `fareLocked`, and a passenger's own ride also carries `poolSize` and `shareRatePercent`.
+
+#### Worked Example — the seed data
+`npm run seed` creates Jashim (driver, **Bullet**, 3 seats) and Nusrat, Rafiq and Shirin, who each request **Mohakhali → Badda** (base ৳180). Log in as Jashim, go online and accept them one by one:
+
+| Jashim accepts | Each passenger pays | Jashim earns |
+|---|---|---|
+| Nusrat | ৳180 | ৳180 |
+| + Rafiq | ৳125 each (saves ৳55) | ৳250 |
+| + Shirin | ৳100 each (saves ৳80) | ৳300 |
+| Shirin cancels | back to ৳125 each | ৳250 |
+| Nusrat's trip starts | Nusrat's ৳125 is locked | — |
+
+#### Upgrading an existing database
+Fares used to be stored as integer paisa with a flat ৳30 pool discount. On startup the server converts stored fares to whole taka once (dividing by 100 and rounding to ৳5), re-prices any pool that has not started, and records this in the database's `user_version` so it never runs twice. A copy of the database file is saved next to it first (`database.sqlite.pre-taka-migration.bak`).
 
 ### Concurrency Guarantee
 To ensure the vehicle's capacity is never exceeded when near-simultaneous claims are made for the last seat, we rely on a database transaction with an **Optimistic Concurrency Atomic Update**.
