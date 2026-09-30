@@ -13,6 +13,7 @@ import { calculateBaseFare, estimateFare, shareRatePercent } from '../utils/fare
 import { isFareFinal, recalculatePoolFares } from '../utils/poolFares';
 import { checkPoolJoin, loadPool, PoolVerdict } from '../utils/pooling';
 import { recordRideEvent } from '../utils/rideEvents';
+import { claimSeats } from '../utils/seats';
 import { DEFAULT_PAYMENT_METHOD, PAYMENT_METHODS, PaymentMethod, isPaymentMethod } from '../utils/payments';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 
@@ -372,21 +373,9 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
       if (!verdict.ok) throw new PoolRejected(verdict);
 
       // ── STEP 2: Atomic seat reservation ────────────────────────────────
-      // Increment occupiedSeats only if seatCapacity >= occupiedSeats + seatCount.
-      const [updatedCount] = await Vehicle.update(
-        { occupiedSeats: sequelize.literal(`occupiedSeats + ${candidate.seatCount}`) },
-        {
-          where: {
-            id: vehicle.id,
-            seatCapacity: {
-              [Op.gte]: sequelize.literal(`occupiedSeats + ${candidate.seatCount}`),
-            },
-          },
-          transaction: t,
-        }
-      );
-
-      if (updatedCount === 0) {
+      // One conditional UPDATE (utils/seats.ts, shared with the QR street-ride flow): seats are taken
+      // only where seatCapacity >= occupiedSeats + seatCount.
+      if (!(await claimSeats(vehicle.id, candidate.seatCount, t))) {
         throw new Error('CAPACITY_EXCEEDED');
       }
 

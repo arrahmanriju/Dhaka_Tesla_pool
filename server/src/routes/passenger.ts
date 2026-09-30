@@ -8,6 +8,7 @@ import { shareRatePercent } from '../utils/fareCalculator';
 import { priceJourney, recordExit } from '../utils/checkpoints';
 import { settleJourney } from '../utils/journeySettlement';
 import { collectPayment } from '../utils/payments';
+import { releaseSeats } from '../utils/seats';
 import { recordRideEvent, joinedMidTrip } from '../utils/rideEvents';
 
 const router = Router();
@@ -434,10 +435,7 @@ router.patch('/rides/:id/cancel', ownPassenger, async (req: AuthenticatedRequest
 
       if (ride.vehicleId) {
         // 2. Release the reserved seats
-        await Vehicle.update(
-          { occupiedSeats: sequelize.literal(`MAX(0, occupiedSeats - ${ride.seatCount})`) },
-          { where: { id: ride.vehicleId }, transaction: t }
-        );
+        await releaseSeats(ride.vehicleId, ride.seatCount, t);
 
         // 3. Recalculate fares for the remaining pool passengers.
         //    recalculatePoolFares() will NOT include this now-CANCELLED ride
@@ -576,10 +574,7 @@ router.patch('/rides/:id/cancel-in-transit', ownPassenger, async (req: Authentic
 
       // Release the seat immediately, and refresh the running estimates of whoever is still on board
       if (current.vehicleId) {
-        await Vehicle.update(
-          { occupiedSeats: sequelize.literal(`MAX(0, occupiedSeats - ${current.seatCount})`) },
-          { where: { id: current.vehicleId }, transaction: t }
-        );
+        await releaseSeats(current.vehicleId, current.seatCount, t);
         await recalculatePoolFares(current.vehicleId, t);
       }
 
