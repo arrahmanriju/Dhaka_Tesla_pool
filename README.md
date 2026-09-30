@@ -189,6 +189,27 @@ A passenger whose ride is `STARTED` can get off part-way with `PATCH /passenger/
 - **Audit trail** — a `RideEvents` row (permanent) records `CANCELLED_IN_TRANSIT`, the actor (the passenger), the time, `cancellationZone`, `chargedFare` and `fullTripEstimate` (what they were on track to pay to their original destination), and the `PoolCheckpoints` row records the zone and new head count. `GET /driver/rides/timeline` shows it beside the other passengers' unchanged events; each passenger's own `timeline`/history carries only their own. The other passengers never see who left, where, or what they paid.
 - **Who and when** — only the ride's owner (404 no such ride, 403 someone else's, 401 not logged in, a driver's login is refused). Only a `STARTED` ride: `COMPLETED`, an earlier status or an already-cancelled ride gets 409. The check and the update are one conditional step inside an immediate transaction, and the driver's *complete* is conditional the same way, so completing and leaving at the same moment cannot both succeed, record two exits or release the seat twice.
 
+## Payment (simulated)
+
+There is **no real gateway**. Each ride has a payment method and, for wallet rides, the fare is taken from a simulated **TeslaPay** balance.
+
+- **Method** — `paymentMethod` is `cash` (default) or `wallet`, chosen when the ride is requested (`POST /ride-requests`, field `paymentMethod`; anything else is a 400). The **Request Ride** form has a payment picker that shows the passenger's own balance.
+- **Wallet** — every user has a `walletBalance` in **whole taka**. (The request said "integer paisa, consistent with how fares are stored", but fares are stored as whole taka since the paisa → taka migration, so the wallet uses the same unit: a balance and a fare can be compared and subtracted directly.) The balance can never go negative.
+- **When it is charged** — when a passenger's **own journey ends**: the driver completes their ride (`COMPLETED`) or they leave mid-trip (`CANCELLED_IN_TRANSIT`). The amount is that ride's **final segment-based fare** (see *Fare Model*), the same number that is stored as `estimatedFare` and shown in the breakdown. A ride cancelled before it started never charges anything.
+
+| `paymentStatus` | Meaning |
+|---|---|
+| `NOT_DUE` | The journey has not ended (or the ride never started): nothing to pay yet |
+| `PAID` | Wallet ride: the wallet was debited by exactly `paymentAmount` (and a `WalletTransactions` ledger row records it, with the balance left) |
+| `CASH_DUE` | Cash ride: `paymentAmount` is what the passenger owes the driver. **The wallet is never touched.** |
+| `FAILED` | Wallet ride, but the balance was lower than the fare. **Nothing was debited**, the balance is unchanged, and the ride still ends normally |
+
+- **Worked example** — Nusrat (wallet ৳1000) and Rafiq (cash ৳500 wallet, unused) share the Uttara → Dhanmondi trip from the fare example: Nusrat's final fare is **৳380**, so her balance becomes 1000 − 380 = **৳620** (`PAID`, `paymentAmount` 380); Rafiq's is **৳200**, recorded as `CASH_DUE` and his wallet stays ৳500. If Nusrat had left at Mohammadpur instead, she would be debited **৳350**.
+- **Insufficient balance — what happens next (MVP).** The debit is one atomic conditional update (`walletBalance` is reduced only where it is at least the fare), so it can never overdraw, even with simultaneous debits. If it does not apply, the payment is marked `FAILED`, no ledger row is written, and the fare is **flagged for cash settlement**: the ride stays `COMPLETED` / `CANCELLED_IN_TRANSIT` (the passenger did travel), `paymentAmount` records what is due, the passenger's card says *Wallet payment failed: pay ৳X in cash to the driver*, and the driver's card says *Wallet payment failed: collect ৳X in cash*. There is no retry, top-up or debt account in this MVP; a real system would retry after a top-up or record a debt. An exact balance pays and leaves ৳0; one taka short fails.
+- **Who sees what** — a passenger reads only their **own** balance and ledger at `GET /passenger/wallet` (the caller comes from the login token; someone else's `passengerId` is a 403, no login a 401, a driver's login a 403) and their own ride's `paymentMethod`, `paymentStatus`, `paymentAmount`. **Drivers never see a wallet balance**: their responses carry a ride's `paymentMethod` and `paymentStatus` (paid / cash to collect / failed) and the amount owed, nothing else.
+- **Seed** — `npm run seed` gives Nusrat ৳1000 (pays by wallet), Rafiq ৳500 (pays cash) and Shirin **৳120** (wallet; small on purpose, so a ৳145 fare fails and shows the cash-settlement path).
+- **Existing databases** — `Users.walletBalance` (default 0) and `RideRequests.paymentMethod / paymentStatus / paymentAmount` (cash, `NOT_DUE`) are added by an idempotent startup migration, which now runs before the paisa → taka migration reads rides; `WalletTransactions` is created by `sync()`.
+
 ## Ride Status Page (Passenger)
 
 The passenger's **Active Rides** tab is the ride status page. Once a driver accepts the ride it shows:
@@ -196,6 +217,7 @@ The passenger's **Active Rides** tab is the ride status page. Once a driver acce
 - **Driver & vehicle** — the driver's name and photo (a placeholder when they have none), their phone number with a tap-to-call button (`tel:` link), and the vehicle as `Bullet · DTP-0001` (nickname · Tesla ID).
 - **Pool** — `Shared ride · 1 other passenger` or `Just you`, seats taken (`2 of 3 seats taken`), and the other passengers by **first name only**.
 - **Progress** — a step tracker, Matched → Driver Arrived → Started → Completed, with the current step highlighted; a waiting message while the ride is still `REQUESTED`; and a clear notice when it is `CANCELLED`.
+- **Payment** — how the ride is paid and its status (*Pay ৳X in cash*, *Paid ৳X from your wallet*, *Wallet payment failed*), for their own ride only.
 - **Fare** — the passenger's own fare only, e.g. `৳155 (shared, you save ৳25)`, marked *≈ estimate* while on board and *✓ Final fare* once their journey has ended, with the breakdown of how it was worked out.
 - **Cancel** — the button appears only while the passenger may cancel (`REQUESTED` or `MATCHED`; see the cancellation table above).
 - **Leave ride here** — once the ride is `STARTED` the ordinary cancel is gone, but the passenger can pick the zone where they are dropped off and leave part-way (see *Leaving a ride mid-trip*).
