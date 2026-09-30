@@ -6,10 +6,12 @@ import driverRoutes from './routes/driver';
 import vehicleRoutes from './routes/vehicle';
 import rideRequestRoutes from './routes/rideRequest';
 import passengerRoutes from './routes/passenger';
+import qrRoutes from './routes/qr';
+import { closeStaleSessions } from './services/qrRides';
 import { sequelize, storagePath } from './models';
 import { UPLOADS_DIR } from './utils/onboarding';
 import onboardingRoutes from './routes/onboarding';
-import { migrateUsersTable, migrateRideRequestsTable, migrateFaresToTaka, migrateMidTripCancellation, migratePayments, migrateVehicleCodes, ensureOneActiveRideIndex } from './migrations';
+import { migrateUsersTable, migrateRideRequestsTable, migrateFaresToTaka, migrateMidTripCancellation, migratePayments, migrateVehicleCodes, ensureOneActiveRideIndex, ensureOneOpenQRSessionIndex } from './migrations';
 
 dotenv.config();
 
@@ -47,6 +49,8 @@ app.use('/ride-requests', rideRequestRoutes);
 
 // Passenger status routes (live tracking, history, cancellation)
 app.use('/passenger', passengerRoutes);
+// Street rides by QR code (drivers with no smartphone; every action is the passenger's)
+app.use('/qr', qrRoutes);
 // Health check endpoint
 app.get('/health', (req: Request, res: Response) => {
   res.status(200).json({ status: 'ok', service: 'dhaka-tesla-pool-backend' });
@@ -83,8 +87,12 @@ if (require.main === module) {
     .then(() => migrateFaresToTaka())
     .then(() => sequelize.sync())
     .then(() => ensureOneActiveRideIndex())
+    .then(() => ensureOneOpenQRSessionIndex())
     .then(() => {
       console.log('Database synced');
+      // Nobody closes a street ride but its passengers, so once a minute close any that ran past the time limit
+      // (they are also closed lazily on every /qr request). unref: the timer never keeps the process alive.
+      setInterval(() => { closeStaleSessions().catch((e) => console.error('QR sweep failed:', e)); }, 60_000).unref();
       app.listen(port, () => {
         console.log(`Server is running on port ${port}`);
       });

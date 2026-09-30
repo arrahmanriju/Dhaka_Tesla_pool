@@ -9,6 +9,7 @@ import { RideEvent, initRideEvent } from './RideEvent';
 import { RideDecline, initRideDecline } from './RideDecline';
 import { PoolCheckpoint, initPoolCheckpoint } from './PoolCheckpoint';
 import { WalletTransaction, initWalletTransaction } from './WalletTransaction';
+import { QRRideSession, QRRideParticipant, DriverBonus, initQRRide } from './QRRide';
 
 // Setup Sequelize for SQLite
 export const storagePath = process.env.DB_STORAGE_PATH || path.join(__dirname, '../../data/database.sqlite');
@@ -28,6 +29,7 @@ initRideEvent(sequelize);
 initRideDecline(sequelize);
 initPoolCheckpoint(sequelize);
 initWalletTransaction(sequelize);
+initQRRide(sequelize);
 
 // Setup Associations
 User.hasMany(PasswordReset, { foreignKey: 'userId', onDelete: 'CASCADE' });
@@ -56,5 +58,12 @@ Vehicle.hasMany(PoolCheckpoint, { foreignKey: 'vehicleId', onDelete: 'CASCADE' }
 User.hasMany(WalletTransaction, { foreignKey: 'userId', onDelete: 'CASCADE' });
 RideRequest.hasMany(WalletTransaction, { foreignKey: 'rideRequestId', onDelete: 'CASCADE' });
 
-export { User, Vehicle, RideRequest, PasswordReset, DriverProfile, RideEvent, RideDecline, PoolCheckpoint, WalletTransaction };
+Vehicle.hasMany(QRRideSession, { foreignKey: 'vehicleId', onDelete: 'CASCADE' });
+QRRideSession.hasMany(QRRideParticipant, { foreignKey: 'sessionId', as: 'participants', onDelete: 'CASCADE' });
+User.hasMany(QRRideParticipant, { foreignKey: 'passengerId', onDelete: 'CASCADE' });
+QRRideSession.hasMany(DriverBonus, { foreignKey: 'sessionId', onDelete: 'CASCADE' });
+QRRideParticipant.hasMany(DriverBonus, { foreignKey: 'participantId', onDelete: 'CASCADE' });
+User.hasMany(DriverBonus, { foreignKey: 'driverId', onDelete: 'CASCADE' });
+
+export { User, Vehicle, RideRequest, PasswordReset, DriverProfile, RideEvent, RideDecline, PoolCheckpoint, WalletTransaction, QRRideSession, QRRideParticipant, DriverBonus };
 

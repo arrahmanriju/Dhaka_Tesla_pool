@@ -234,3 +234,15 @@ export async function migrateVehicleCodes(): Promise<void> {
   }
   await sequelize.query('CREATE UNIQUE INDEX IF NOT EXISTS `vehicles_vehicle_code_unique` ON `Vehicles` (`vehicleCode`)');
 }
+
+/**
+ * Database-level guarantee behind "at most one OPEN street-ride session per vehicle": a partial unique
+ * index. The join route checks first (inside an IMMEDIATE transaction); this catches two first passengers
+ * racing to open the same vehicle's session.
+ */
+export async function ensureOneOpenQRSessionIndex(): Promise<void> {
+  await sequelize.query(
+    'CREATE UNIQUE INDEX IF NOT EXISTS `qr_ride_sessions_one_open_per_vehicle` ON `QRRideSessions` (`vehicleId`) ' +
+      "WHERE `status` = 'OPEN'"
+  );
+}
