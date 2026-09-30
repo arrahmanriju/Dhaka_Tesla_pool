@@ -3,9 +3,9 @@
  *
  * Worked example (numbers you can check by hand; see segmentFares.test.ts). Nusrat rides Uttara →
  * Dhanmondi and starts alone; Rafiq boards at Mirpur going to Dhanmondi; both are dropped there.
- *   Nusrat's fare = 100 + 180 (Uttara → Mirpur alone) + 98 (Mirpur → Dhanmondi at 70%) = 378 → ৳380
- *   Rafiq's  fare = 100 + 98 = 198 → ৳200
- * Nusrat pays from her wallet: ৳1000 − ৳380 = ৳620. Rafiq pays cash: his wallet stays ৳500.
+ *   Nusrat's fare = 236.25 (Uttara → Mirpur alone) + 111.875 (Mirpur → Dhanmondi, 2 on board) = 348.125 → ৳348
+ *   Rafiq's  fare = 240 / 2 + 20 = ৳140
+ * Nusrat pays from her wallet: ৳1000 − ৳348 = ৳652. Rafiq pays cash: his wallet stays ৳500.
  *
  * Money is whole taka, the unit fares are stored in.
  */
@@ -113,28 +113,28 @@ describe('Simulated payments — cash and TeslaPay wallet', () => {
 
   // ─────────────────────────── wallet debit ───────────────────────────
   describe('wallet rides', () => {
-    it('debits exactly the final segment-based fare on COMPLETED: ৳380', async () => {
+    it('debits exactly the final segment-based fare on COMPLETED: ৳348', async () => {
       const { n, r } = await nusratWalletRafiqCash();
       await driverAction(n, 'complete');
       await driverAction(r, 'complete');
 
-      expect((await ride(n)).estimatedFare).toBe(380); // the fare from the checkpoint walk
-      expect(await ride(n)).toMatchObject({ paymentMethod: 'wallet', paymentStatus: 'PAID', paymentAmount: 380 });
-      expect(await balance(nusrat)).toBe(620); // 1000 − 380
+      expect((await ride(n)).estimatedFare).toBe(348); // the fare from the checkpoint walk
+      expect(await ride(n)).toMatchObject({ paymentMethod: 'wallet', paymentStatus: 'PAID', paymentAmount: 348 });
+      expect(await balance(nusrat)).toBe(652); // 1000 − 348
       const ledger = await WalletTransaction.findAll({ where: { userId: nusrat.id } });
       expect(ledger).toHaveLength(1);
-      expect(ledger[0]).toMatchObject({ rideRequestId: n, type: 'DEBIT', amount: 380, balanceAfter: 620 });
+      expect(ledger[0]).toMatchObject({ rideRequestId: n, type: 'DEBIT', amount: 348, balanceAfter: 652 });
     });
 
-    it('debits the segment fare for the part travelled on CANCELLED_IN_TRANSIT: ৳350', async () => {
+    it('debits the segment fare for the part travelled on CANCELLED_IN_TRANSIT: ৳332', async () => {
       const { n } = await nusratWalletRafiqCash();
       const res = await leave(n, nusrat, 'Mohammadpur');
 
       expect(res.status).toBe(200);
-      expect(res.body.fare.fare).toBe(350); // 100 + 180 + 70
-      expect(res.body.payment).toEqual({ method: 'wallet', status: 'PAID', amount: 350, walletBalance: 650 });
-      expect(await ride(n)).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', paymentStatus: 'PAID', paymentAmount: 350 });
-      expect(await balance(nusrat)).toBe(650);
+      expect(res.body.fare.fare).toBe(332); // 244.29 alone + 87.86 shared = 332.14
+      expect(res.body.payment).toEqual({ method: 'wallet', status: 'PAID', amount: 332, walletBalance: 668 });
+      expect(await ride(n)).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', paymentStatus: 'PAID', paymentAmount: 332 });
+      expect(await balance(nusrat)).toBe(668);
     });
 
     it('the debit equals estimatedFare for every wallet ride, whatever the pool did', async () => {
@@ -144,9 +144,9 @@ describe('Simulated payments — cash and TeslaPay wallet', () => {
       await start(b);
       await driverAction(a, 'complete');
       await driverAction(b, 'complete');
-      // both 4 km shared: 100 + 56 = 156 → ৳155 each
-      expect(await balance(nusrat)).toBe(1000 - 155);
-      expect(await balance(rafiq)).toBe(500 - 155);
+      // both 4 km shared: tripCost 180 / 2 + 20 = ৳110 each
+      expect(await balance(nusrat)).toBe(1000 - 110);
+      expect(await balance(rafiq)).toBe(500 - 110);
       expect((await ride(a)).paymentAmount).toBe((await ride(a)).estimatedFare);
     });
 
@@ -155,7 +155,7 @@ describe('Simulated payments — cash and TeslaPay wallet', () => {
       expect((await driverAction(n, 'complete')).status).toBe(200);
       expect((await driverAction(n, 'complete')).status).toBe(409);
       expect((await leave(n, nusrat, 'Mohammadpur')).status).toBe(409);
-      expect(await balance(nusrat)).toBe(620);
+      expect(await balance(nusrat)).toBe(652);
       expect(await WalletTransaction.count({ where: { userId: nusrat.id } })).toBe(1);
     });
   });
@@ -221,7 +221,7 @@ describe('Simulated payments — cash and TeslaPay wallet', () => {
       await driverAction(n, 'complete');
       await driverAction(r, 'complete');
 
-      expect(await ride(r)).toMatchObject({ paymentMethod: 'cash', paymentStatus: 'CASH_DUE', paymentAmount: 200 });
+      expect(await ride(r)).toMatchObject({ paymentMethod: 'cash', paymentStatus: 'CASH_DUE', paymentAmount: 140 });
       expect(await balance(rafiq)).toBe(500);
       expect(await WalletTransaction.count({ where: { userId: rafiq.id } })).toBe(0);
     });
@@ -229,8 +229,8 @@ describe('Simulated payments — cash and TeslaPay wallet', () => {
     it('a cash passenger with an EMPTY wallet is not affected, and a mid-trip exit owes the part-trip fare', async () => {
       await User.update({ walletBalance: 0 }, { where: { id: rafiq.id } });
       const { r } = await nusratWalletRafiqCash();
-      const res = await leave(r, rafiq, 'Mohammadpur'); // Mirpur → Mohammadpur, 2 on board: 100 + 70 = ৳170
-      expect(res.body.payment).toEqual({ method: 'cash', status: 'CASH_DUE', amount: 170, walletBalance: 0 });
+      const res = await leave(r, rafiq, 'Mohammadpur'); // Mirpur → Mohammadpur, 2 on board: tripCost 100 + 100 = 200; 200 / 2 + 20 = ৳120
+      expect(res.body.payment).toEqual({ method: 'cash', status: 'CASH_DUE', amount: 120, walletBalance: 0 });
       expect(await balance(rafiq)).toBe(0);
       expect(await WalletTransaction.count()).toBe(0);
     });
@@ -240,7 +240,7 @@ describe('Simulated payments — cash and TeslaPay wallet', () => {
       await driverAction(r, 'complete'); // Rafiq (cash) finishes first
       expect(await balance(nusrat)).toBe(1000); // Nusrat has not finished, and Rafiq's ride never debits anyone
       await driverAction(n, 'complete');
-      expect(await balance(nusrat)).toBe(620);
+      expect(await balance(nusrat)).toBe(652);
       expect(await balance(rafiq)).toBe(500);
     });
   });
@@ -254,8 +254,8 @@ describe('Simulated payments — cash and TeslaPay wallet', () => {
 
       const mine = await wallet(nusrat);
       expect(mine.status).toBe(200);
-      expect(mine.body).toMatchObject({ balance: 620, currency: 'BDT' });
-      expect(mine.body.transactions).toEqual([expect.objectContaining({ rideId: n, type: 'DEBIT', amount: 380, balanceAfter: 620 })]);
+      expect(mine.body).toMatchObject({ balance: 652, currency: 'BDT' });
+      expect(mine.body.transactions).toEqual([expect.objectContaining({ rideId: n, type: 'DEBIT', amount: 348, balanceAfter: 652 })]);
       expect((await wallet(rafiq)).body).toMatchObject({ balance: 500, transactions: [] });
     });
 
@@ -279,11 +279,11 @@ describe('Simulated payments — cash and TeslaPay wallet', () => {
       const text = JSON.stringify(rafiqRide.body);
       expect(rafiqRide.body.ride).toMatchObject({ paymentMethod: 'cash', paymentStatus: 'NOT_DUE' });
       expect(text).not.toMatch(/walletBalance|balanceAfter/);
-      expect(text).not.toContain('620'); // Nusrat's balance after paying
+      expect(text).not.toContain('652'); // Nusrat's balance after paying
       expect((await request(app).get(`/passenger/rides/${n}`).set(asUser(rafiq.id))).status).toBe(403); // her ride, her payment
 
       const nusratRide = (await request(app).get(`/passenger/rides/${n}`).set(asUser(nusrat.id))).body.ride;
-      expect(nusratRide).toMatchObject({ paymentMethod: 'wallet', paymentStatus: 'PAID', paymentAmount: 380 });
+      expect(nusratRide).toMatchObject({ paymentMethod: 'wallet', paymentStatus: 'PAID', paymentAmount: 348 });
       const list = JSON.stringify((await request(app).get('/passenger/rides/history').set(asUser(nusrat.id))).body);
       expect(list).not.toMatch(/walletBalance/);
       expect((await request(app).get('/ride-requests/me').set(asUser(nusrat.id))).body.requests[0]).not.toHaveProperty('walletBalance');

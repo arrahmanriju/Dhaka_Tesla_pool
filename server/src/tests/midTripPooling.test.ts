@@ -150,9 +150,9 @@ describe('Mid-trip pooling — Jashim (Bullet, 3 seats), Nusrat, Rafiq, Shirin',
       expect(res.body.rideRequest.status).toBe('MATCHED');
       expect(await statusOf(nusratRide)).toBe('STARTED');
       expect(await occupied()).toBe(2);
-      // Nusrat is still alone on board (৳180). Rafiq is matched into a pool of 2: 100 + 80 × 70% = 156 → ৳155.
+      // Nusrat is still alone on board (৳180). Rafiq is matched into a pool of 2: tripCost 100 + 4 × 20 = 180, 180 / 2 + 20 = ৳110.
       expect(await fareOf(nusratRide)).toBe(180);
-      expect(await fareOf(created.body.rideRequest.id)).toBe(155);
+      expect(await fareOf(created.body.rideRequest.id)).toBe(110);
     });
 
     it('Rafiq then goes through his own lifecycle while Nusrat is still riding', async () => {
@@ -217,9 +217,9 @@ describe('Mid-trip pooling — Jashim (Bullet, 3 seats), Nusrat, Rafiq, Shirin',
       const res = await accept(shirinReq.body.rideRequest.id);
       expect(res.status).toBe(200);
       expect(await occupied()).toBe(3);
-      // Pool of 3: 100 + 80 × 55% = 144 → ৳145 for Shirin, and Rafiq (matched, not on board) is re-priced to ৳145. Nusrat is alone on board: ৳180.
-      expect(await fareOf(shirinReq.body.rideRequest.id)).toBe(145);
-      expect(await fareOf(rafiqRide)).toBe(145);
+      // Pool of 3: 180 / 3 + 20 = ৳80 for Shirin, and Rafiq (matched, not on board; his trip is 4 km too) is re-priced to ৳80. Nusrat is alone on board: ৳180.
+      expect(await fareOf(shirinReq.body.rideRequest.id)).toBe(80);
+      expect(await fareOf(rafiqRide)).toBe(80);
       expect(await fareOf(nusratRide)).toBe(180);
     });
 
@@ -413,11 +413,11 @@ describe('Mid-trip pooling — Jashim (Bullet, 3 seats), Nusrat, Rafiq, Shirin',
       return { nusratRide, rafiqRide, shirinRide };
     }
 
-    it('fares are per passenger: Nusrat ৳180 (alone on board), Rafiq ৳135, Shirin ৳145', async () => {
+    it('fares are per passenger: Nusrat ৳180 (alone on board), Rafiq ৳73, Shirin ৳80', async () => {
       const { nusratRide, rafiqRide, shirinRide } = await threeOnBullet();
       expect(await fareOf(nusratRide)).toBe(180);
-      expect(await fareOf(rafiqRide)).toBe(135); // 100 + 60 × 55% = 133 → 135
-      expect(await fareOf(shirinRide)).toBe(145);
+      expect(await fareOf(rafiqRide)).toBe(73); // tripCost 100 + 3 × 20 = 160; 160 / 3 = 53.33 → 53, + 20
+      expect(await fareOf(shirinRide)).toBe(80); // 180 / 3 + 20
     });
 
     it('nobody’s response carries another passenger’s fare, route, phone or id', async () => {
@@ -430,11 +430,11 @@ describe('Mid-trip pooling — Jashim (Bullet, 3 seats), Nusrat, Rafiq, Shirin',
       };
 
       // Own fare only
-      expect((await passengerActive(r)).body.rides[0]).toMatchObject({ estimatedFare: 135 });
+      expect((await passengerActive(r)).body.rides[0]).toMatchObject({ estimatedFare: 73 });
       expect((await passengerActive(n)).body.rides[0]).toMatchObject({ estimatedFare: 180, fareFinal: false });
-      expect(bodies.rafiq).not.toMatch(/"estimatedFare":(180|145)\b/);
-      expect(bodies.nusrat).not.toMatch(/"estimatedFare":(135|145)\b/);
-      expect(bodies.shirin).not.toMatch(/"estimatedFare":(180|135)\b/);
+      expect(bodies.rafiq).not.toMatch(/"estimatedFare":(180|80)\b/);
+      expect(bodies.nusrat).not.toMatch(/"estimatedFare":(73|80)\b/);
+      expect(bodies.shirin).not.toMatch(/"estimatedFare":(180|73)\b/);
 
       // No ids or phone numbers of the others
       for (const [me, others] of [[n, [r, s]], [r, [n, s]], [s, [n, r]]] as const) {
