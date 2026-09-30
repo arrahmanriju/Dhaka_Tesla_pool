@@ -524,7 +524,10 @@ function HistoryTab({ driverId }: { driverId: string }) {
   if (loading) return <LoadingScreen label={t('loading.trips')} />;
 
   const completed = rides.filter((r) => r.status === 'COMPLETED');
-  const totalEarned = completed.reduce((s, r) => s + r.estimatedFare, 0);
+  // A passenger who left mid-route still paid for the part they travelled (their pro-rated fare).
+  const totalEarned = rides
+    .filter((r) => r.status === 'COMPLETED' || r.status === 'CANCELLED_IN_TRANSIT')
+    .reduce((s, r) => s + r.estimatedFare, 0);
 
   return (
     <div className="animate-in">

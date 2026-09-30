@@ -10,7 +10,7 @@ import type { TranslationKey } from '@/lib/translations';
  * Passengers are shown by first name only.
  */
 export function PoolTimeline({ refreshKey }: { refreshKey: unknown }) {
-  const { t, locale } = usePreferences();
+  const { t, tz, locale } = usePreferences();
   const [events, setEvents] = useState<PoolEvent[]>([]);
 
   useEffect(() => {
@@ -22,7 +22,14 @@ export function PoolTimeline({ refreshKey }: { refreshKey: unknown }) {
   if (events.length === 0) return null;
 
   const label = (e: PoolEvent) =>
-    e.joinedMidTrip
+    e.status === 'CANCELLED_IN_TRANSIT'
+      ? t('d.timeline.CANCELLED_IN_TRANSIT', {
+          name: e.passengerFirstName,
+          zone: e.cancellationZone ? tz(e.cancellationZone) : '—',
+          fare: e.chargedFare ?? 0,
+          locked: e.lockedFare ?? 0,
+        })
+      : e.joinedMidTrip
       ? t('d.timeline.MATCHED_MID', { name: e.passengerFirstName, n: e.ridersOnboard })
       : t(`d.timeline.${e.status}` as TranslationKey, { name: e.passengerFirstName });
 

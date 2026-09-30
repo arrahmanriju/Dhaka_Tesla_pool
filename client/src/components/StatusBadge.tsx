@@ -27,11 +27,28 @@ const STEPS: { status: RideStatus; label: TranslationKey; icon: string }[] = [
 ];
 
 const ORDER: Record<string, number> = {
-  REQUESTED: 0, MATCHED: 1, DRIVER_ARRIVED: 2, STARTED: 3, COMPLETED: 4, CANCELLED: -1,
+  REQUESTED: 0, MATCHED: 1, DRIVER_ARRIVED: 2, STARTED: 3, COMPLETED: 4, CANCELLED: -1, CANCELLED_IN_TRANSIT: -1,
 };
 
-export function StatusTimeline({ status }: { status: RideStatus }) {
-  const { t } = usePreferences();
+export function StatusTimeline({
+  status,
+  cancellationZone,
+  chargedFare,
+}: {
+  status: RideStatus;
+  /** Where the passenger left the ride (CANCELLED_IN_TRANSIT) */
+  cancellationZone?: string | null;
+  /** What they were charged for the part they travelled */
+  chargedFare?: number;
+}) {
+  const { t, tz } = usePreferences();
+  if (status === 'CANCELLED_IN_TRANSIT') {
+    return (
+      <div className="info-banner" id="ride-left-mid-trip-message" role="status" style={{ justifyContent: 'center' }}>
+        {t('timeline.cancelledInTransit', { zone: cancellationZone ? tz(cancellationZone) : '—', fare: chargedFare ?? 0 })}
+      </div>
+    );
+  }
   if (status === 'CANCELLED') {
     return (
       <div className="error-banner" id="ride-cancelled-message" role="status" style={{ justifyContent: 'center' }}>

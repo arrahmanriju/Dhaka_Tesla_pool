@@ -9,7 +9,8 @@ import { PassengerFare, SeatCount } from './UI';
 /** How often an open ride re-reads itself. Plain polling: no websockets, and no live GPS. */
 export const RIDE_POLL_MS = 5000;
 
-const isFinished = (status: Ride['status']) => status === 'COMPLETED' || status === 'CANCELLED';
+const isFinished = (status: Ride['status']) =>
+  status === 'COMPLETED' || status === 'CANCELLED' || status === 'CANCELLED_IN_TRANSIT';
 const isInProgress = (status: Ride['status']) =>
   status === 'MATCHED' || status === 'DRIVER_ARRIVED' || status === 'STARTED';
 
@@ -102,6 +103,34 @@ export function RideStatusCard({
     await fetchLatest(); // show CANCELLED straight away instead of waiting for the next poll
   };
 
+  // Leaving a ride that has already started: the passenger names the zone where they are dropped off.
+  const [leaving, setLeaving] = useState(false);
+  const [zones, setZones] = useState<string[]>([]);
+  const [leaveZone, setLeaveZone] = useState('');
+  const [leaveBusy, setLeaveBusy] = useState(false);
+  const [leaveError, setLeaveError] = useState('');
+
+  const openLeave = async () => {
+    setLeaving(true); setLeaveError('');
+    if (zones.length === 0) {
+      try { setZones((await passengerApi.getRideOptions()).zones); } catch { /* the server still validates the zone */ }
+    }
+  };
+
+  const confirmLeave = async () => {
+    if (!leaveZone) { setLeaveError(t('rs.leave.choose')); return; }
+    setLeaveBusy(true); setLeaveError('');
+    try {
+      await passengerApi.cancelInTransit(ride.id, leaveZone);
+      setLeaving(false);
+      await fetchLatest(); // shows the outcome: where they left and what they were charged
+    } catch (err) {
+      setLeaveError(err instanceof ApiError ? err.message : t('rs.reconnecting'));
+    } finally {
+      setLeaveBusy(false);
+    }
+  };
+
   const { driver, pool, vehicle } = ride;
   const statusMessage = STATUS_MESSAGE[ride.status];
   const updated = updatedAt.toLocaleTimeString(locale);
@@ -121,7 +150,11 @@ export function RideStatusCard({
       </div>
 
       {/* Matched → Driver Arrived → Started → Completed (and the messages for waiting / cancelled) */}
-      <StatusTimeline status={ride.status} />
+      <StatusTimeline
+        status={ride.status}
+        cancellationZone={ride.cancellationZone ?? null}
+        chargedFare={ride.estimatedFare}
+      />
       {statusMessage && (
         <p className="ride-status__message" id="ride-status-message" role="status" aria-live="polite">
           {t(statusMessage)}
@@ -129,7 +162,7 @@ export function RideStatusCard({
       )}
 
       {/* Driver & vehicle: only once a driver has accepted (and not on a cancelled ride) */}
-      {driver && ride.status !== 'CANCELLED' && (
+      {driver && ride.status !== 'CANCELLED' && ride.status !== 'CANCELLED_IN_TRANSIT' && (
         <section className="ride-block" aria-label={t('rs.driverVehicle')} id="ride-driver">
           <h3 className="ride-block__title">{t('rs.driverVehicle')}</h3>
           <div className="driver-row">
@@ -211,7 +244,41 @@ export function RideStatusCard({
             {cancelling ? t('p.active.cancelling') : t('p.active.cancelRide')}
           </button>
         )}
+        {/* Once the trip has started the ordinary cancel is gone, but the passenger can still get off part-way */}
+        {ride.canCancelInTransit && !leaving && (
+          <button id={`leave-ride-${ride.id}`} className="btn btn--danger btn--sm" onClick={openLeave}>
+            {t('rs.leave.button')}
+          </button>
+        )}
       </div>
+
+      {ride.canCancelInTransit && leaving && (
+        <section className="ride-block" id={`leave-panel-${ride.id}`} aria-label={t('rs.leave.title')}>
+          <h3 className="ride-block__title">{t('rs.leave.title')}</h3>
+          <p className="form-hint">{t('rs.leave.hint')}</p>
+          <select
+            id={`leave-zone-${ride.id}`}
+            className="form-control"
+            value={leaveZone}
+            onChange={(e) => setLeaveZone(e.target.value)}
+            disabled={leaveBusy}
+          >
+            <option value="">{t('rs.leave.choose')}</option>
+            {zones.filter((z) => z !== ride.pickupZone && z !== ride.destinationZone).map((z) => (
+              <option key={z} value={z}>{tz(z)}</option>
+            ))}
+          </select>
+          {leaveError && <div className="error-banner" role="alert" style={{ marginTop: 8 }}>{leaveError}</div>}
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <button className="btn btn--ghost btn--sm" onClick={() => setLeaving(false)} disabled={leaveBusy}>
+              {t('rs.leave.keep')}
+            </button>
+            <button id={`confirm-leave-${ride.id}`} className="btn btn--danger btn--sm" onClick={confirmLeave} disabled={leaveBusy}>
+              {leaveBusy ? t('rs.leave.leaving') : t('rs.leave.confirm')}
+            </button>
+          </div>
+        </section>
+      )}
     </article>
   );
 }

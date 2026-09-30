@@ -56,7 +56,9 @@ export type RideStatus =
   | 'DRIVER_ARRIVED'
   | 'STARTED'
   | 'COMPLETED'
-  | 'CANCELLED';
+  | 'CANCELLED'
+  /** The passenger was picked up and left mid-route, at `cancellationZone`, paying a pro-rated fare */
+  | 'CANCELLED_IN_TRANSIT';
 
 export interface User {
   id: string;
@@ -186,7 +188,19 @@ export interface Ride {
   /** Set on the driver's pending list: the trip is already under way, so accepting adds them mid-trip */
   joinsMidTrip?: boolean;
   /** This passenger's own history (passenger endpoints only) */
-  timeline?: { status: RideStatus; at: string; ridersOnboard?: number; joinedMidTrip?: boolean }[];
+  timeline?: {
+    status: RideStatus;
+    at: string;
+    ridersOnboard?: number;
+    joinedMidTrip?: boolean;
+    cancellationZone?: string;
+    chargedFare?: number;
+    lockedFare?: number;
+  }[];
+  /** true while the ride is STARTED: the passenger may still leave at a zone of their choice */
+  canCancelInTransit?: boolean;
+  /** Where the passenger left the ride (CANCELLED_IN_TRANSIT only) */
+  cancellationZone?: string | null;
   /** true when this passenger was matched while another passenger was already travelling */
   joinedMidTrip?: boolean;
   createdAt: string;
@@ -203,6 +217,22 @@ export interface PoolEvent {
   poolSize: number;
   ridersOnboard: number;
   joinedMidTrip: boolean;
+  /** CANCELLED_IN_TRANSIT only: where the passenger left, what they were charged, and the full-trip fare */
+  cancellationZone?: string;
+  chargedFare?: number;
+  lockedFare?: number;
+}
+
+/** The pro-rated bill for leaving a started ride: fare = baseCharge + distanceCharge − poolDiscount. */
+export interface ProRatedBill {
+  baseCharge: number;
+  distanceKm: number;
+  distanceCharge: number;
+  grossFare: number;
+  poolDiscount: number;
+  fare: number;
+  lockedFare: number;
+  limited: boolean;
 }
 
 export interface Vehicle {
@@ -277,6 +307,13 @@ export const passengerApi = {
   getRide: (rideId: string) => request<{ ride: Ride }>(`/passenger/rides/${rideId}`),
 
   getHistory: () => request<{ rides: Ride[] }>('/passenger/rides/history'),
+
+  /** Leave a ride that has already started, at the zone where the passenger is dropped off. */
+  cancelInTransit: (rideId: string, cancellationZone: string) =>
+    request<{ status: RideStatus; cancellationZone: string; fare: ProRatedBill }>(
+      `/passenger/rides/${rideId}/cancel-in-transit`,
+      { method: 'PATCH', body: JSON.stringify({ cancellationZone }) }
+    ),
 
   cancelRide: (rideId: string) =>
     request<{ message: string; status: string }>(`/passenger/rides/${rideId}/cancel`, { method: 'PATCH' }),
