@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "tsx --test src/lib/errors.test.ts src/lib/translations.test.ts src/lib/qrRide.test.ts"
+    "test": "tsx --test src/lib/errors.test.ts src/lib/translations.test.ts src/lib/qrRide.test.ts src/lib/baseUrl.test.ts"
   },
   "dependencies": {
     "next": "16.3.6",
