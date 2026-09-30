@@ -21,7 +21,7 @@ export default function Home() {
       <PreferenceControls floating />
       <div className="hero__content animate-in">
         <div className="hero__eyebrow">
-          <span>⚡</span>
+          <span>🛺</span>
           {t('hero.eyebrow')}
         </div>
         <h1 className="hero__title">

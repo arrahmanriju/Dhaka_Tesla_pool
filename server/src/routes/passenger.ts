@@ -6,7 +6,9 @@ import { validateTransition, RideStatus, DHAKA_ZONES } from '../models/RideReque
 import { isFareFinal, recalculatePoolFares } from '../utils/poolFares';
 import { priceJourney, recordExit } from '../utils/checkpoints';
 import { cancellationFare } from '../utils/fareCalculator';
+import { closeStaleSessions, getQRHistory } from '../services/qrRides';
 import { collectPayment } from '../utils/payments';
+import { releaseSeats } from '../utils/seats';
 import { recordRideEvent, joinedMidTrip } from '../utils/rideEvents';
 
 const router = Router();
@@ -319,7 +321,9 @@ router.get('/rides/active', ownPassenger, async (req: AuthenticatedRequest, res:
 
 // ---------------------------------------------------------------------------
 // GET /passenger/rides/history   (login required)
-// Passenger views their completed and cancelled ride history.
+// Passenger views their completed and cancelled ride history: app rides AND finished street rides (QR),
+// in ONE list sorted by when each ended, newest first. Every row has `source`: 'APP' or 'QR'; a QR row
+// also has a `qr` object (vehicle, how it ended, the bonus their joining earned the driver, timestamps).
 // ---------------------------------------------------------------------------
 router.get('/rides/history', ownPassenger, async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -335,10 +339,14 @@ router.get('/rides/history', ownPassenger, async (req: AuthenticatedRequest, res
       order: [['updatedAt', 'DESC']],
     });
 
+    // A street ride that timed out while nobody was looking is closed (and charged) first, so it is in the list
+    await closeStaleSessions();
+    const streetTrips = await getQRHistory(passengerId);
+
     const timelines = await timelineFor(history.map((r: any) => r.id), passengerId);
-    res.json({
-      rides: history.map((r: any) => ({
+    const appRides = history.map((r: any) => ({
         id: r.id,
+        source: 'APP' as const,
         timeline: timelines.get(r.id) ?? [],
         cancellationZone: r.cancellationZone ?? null,
         paymentMethod: r.paymentMethod,
@@ -355,8 +363,11 @@ router.get('/rides/history', ownPassenger, async (req: AuthenticatedRequest, res
         vehicleId: r.vehicleId,
         createdAt: r.createdAt,
         updatedAt: r.updatedAt,
-      })),
-    });
+    }));
+
+    // One list, newest first by when the trip ended (an app ride's last update, a street trip's exit)
+    const rides = [...appRides, ...streetTrips].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+    res.json({ rides });
   } catch (error) {
     console.error('Passenger history error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -434,10 +445,7 @@ router.patch('/rides/:id/cancel', ownPassenger, async (req: AuthenticatedRequest
 
       if (ride.vehicleId) {
         // 2. Release the reserved seats
-        await Vehicle.update(
-          { occupiedSeats: sequelize.literal(`MAX(0, occupiedSeats - ${ride.seatCount})`) },
-          { where: { id: ride.vehicleId }, transaction: t }
-        );
+        await releaseSeats(ride.vehicleId, ride.seatCount, t);
 
         // 3. Recalculate fares for the remaining pool passengers.
         //    recalculatePoolFares() will NOT include this now-CANCELLED ride
@@ -590,10 +598,7 @@ router.patch('/rides/:id/cancel-in-transit', ownPassenger, async (req: Authentic
 
       // Release the seat immediately, and refresh the running estimates of whoever is still on board
       if (current.vehicleId) {
-        await Vehicle.update(
-          { occupiedSeats: sequelize.literal(`MAX(0, occupiedSeats - ${current.seatCount})`) },
-          { where: { id: current.vehicleId }, transaction: t }
-        );
+        await releaseSeats(current.vehicleId, current.seatCount, t);
         await recalculatePoolFares(current.vehicleId, t);
       }
 

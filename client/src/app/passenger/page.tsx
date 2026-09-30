@@ -4,12 +4,14 @@ import { useRouter } from 'next/navigation';
 import { AppNav } from '@/components/AppNav';
 import { StatusBadge } from '@/components/StatusBadge';
 import { RideStatusCard } from '@/components/RideStatusCard';
+import { StreetRideTab } from '@/components/StreetRide';
 import { LoadingScreen, EmptyState, ErrorBanner, ErrorState, SuccessBanner, SeatCount, PassengerFare } from '@/components/UI';
-import { passengerApi, type FareEstimate, type PaymentMethod, type Ride, type User, ApiError } from '@/lib/api';
+import { passengerApi, qrApi, type FareEstimate, type PaymentMethod, type Ride, type User, ApiError } from '@/lib/api';
 import { getUser } from '@/lib/auth';
+import { qrSessionToRide } from '@/lib/qrRide';
 import { usePreferences, useFormatApiError } from '@/lib/preferences';
 
-type Tab = 'request' | 'active' | 'history';
+type Tab = 'request' | 'active' | 'history' | 'street';
 
 export default function PassengerDashboard() {
   const router = useRouter();
@@ -18,6 +20,10 @@ export default function PassengerDashboard() {
   const [tab, setTab] = useState<Tab>('active');
   // Shown on the status tab right after a ride is requested.
   const [justRequested, setJustRequested] = useState(false);
+  // Shown on the status tab right after joining a street ride
+  const [justJoinedStreet, setJustJoinedStreet] = useState(false);
+  // A link like /passenger?code=BULLET (a QR that holds a link) opens the Street Ride tab with the code filled in
+  const [streetCode, setStreetCode] = useState('');
 
   useEffect(() => {
     const u = getUser();
@@ -26,6 +32,8 @@ export default function PassengerDashboard() {
       return;
     }
     setUser(u);
+    const code = new URLSearchParams(window.location.search).get('code');
+    if (code) { setStreetCode(code); setTab('street'); }
   }, [router]);
 
   if (!user) return <LoadingScreen label={t('loading.passenger')} />;
@@ -40,13 +48,14 @@ export default function PassengerDashboard() {
           {([
             { id: 'active',  label: `🚦 ${t('p.tab.active')}` },
             { id: 'request', label: `➕ ${t('p.tab.request')}` },
+            { id: 'street',  label: `🛺 ${t('p.tab.street')}` },
             { id: 'history', label: `🕓 ${t('p.tab.history')}` },
           ] as { id: Tab; label: string }[]).map((t) => (
             <button
               key={t.id}
               id={`tab-${t.id}`}
               className={`tab-nav__item${tab === t.id ? ' tab-nav__item--active' : ''}`}
-              onClick={() => { setJustRequested(false); setTab(t.id); }}
+              onClick={() => { setJustRequested(false); setJustJoinedStreet(false); setTab(t.id); }}
             >
               {t.label}
             </button>
@@ -63,8 +72,9 @@ export default function PassengerDashboard() {
           />
         )}
         {tab === 'active'   && (
-          <ActiveRidesTab onNavigate={setTab} justRequested={justRequested} />
+          <ActiveRidesTab onNavigate={setTab} justRequested={justRequested} justJoinedStreet={justJoinedStreet} />
         )}
+        {tab === 'street'   && <StreetRideTab initialCode={streetCode} onJoined={() => { setJustJoinedStreet(true); setTab('active'); }} onViewActive={() => setTab('active')} />}
         {tab === 'history'  && <HistoryTab />}
       </div>
     </div>
@@ -333,13 +343,17 @@ function RequestRideTab({
 function ActiveRidesTab({
   onNavigate,
   justRequested,
+  justJoinedStreet,
 }: {
   onNavigate: (tab: Tab) => void;
   justRequested: boolean;
+  justJoinedStreet: boolean;
 }) {
   const { t } = usePreferences();
   const formatError = useFormatApiError();
   const [rides, setRides] = useState<Ride[]>([]);
+  // The street ride (joined by QR code) the passenger is on now, shown with the same card as an app ride
+  const [streetRide, setStreetRide] = useState<Ride | null>(null);
   // The list itself could not be loaded (as opposed to a failed action on a ride, which uses `error`)
   const [loadError, setLoadError] = useState('');
   // Bumped on every reload so each ride card starts again from the fresh data.
@@ -352,8 +366,9 @@ function ActiveRidesTab({
   const load = useCallback(async () => {
     setLoading(true); setError(''); setLoadError('');
     try {
-      const res = await passengerApi.getActiveRides();
+      const [res, street] = await Promise.all([passengerApi.getActiveRides(), qrApi.mine()]);
       setRides(res.rides);
+      setStreetRide(street.session ? qrSessionToRide(street.session) : null);
       setVersion((v) => v + 1);
     } catch (err) {
       setLoadError(formatError(err));
@@ -392,11 +407,12 @@ function ActiveRidesTab({
 
       {error && <ErrorBanner message={error} />}
       {justRequested && <SuccessBanner message={t('p.req.success')} />}
+      {justJoinedStreet && streetRide && <SuccessBanner message={t('qr.joinedActive')} />}
       {cancelSuccess && <SuccessBanner message={cancelSuccess} />}
 
       {loadError ? (
         <ErrorState message={loadError} onRetry={() => load()} />
-      ) : rides.length === 0 ? (
+      ) : rides.length === 0 && !streetRide ? (
         <EmptyState
           icon="🛣️"
           title={t('p.active.emptyTitle')}
@@ -409,6 +425,16 @@ function ActiveRidesTab({
         />
       ) : (
         <div className="ride-list">
+          {streetRide && (
+            <RideStatusCard
+              key={`street-${streetRide.id}-${version}`}
+              initial={streetRide}
+              onCancel={handleCancel}
+              cancelling={false}
+              // Their own trip ended (I've arrived, or it timed out): nothing left to show here, it is in History now
+              street={{ onEnded: () => onNavigate('history') }}
+            />
+          )}
           {rides.map((ride) => (
             <RideStatusCard
               key={`${ride.id}-${version}`}
@@ -483,12 +509,16 @@ function HistoryTab() {
       ) : (
         <div className="ride-list">
           {rides.map((ride) => (
-            <div key={ride.id} className="ride-card">
+            <div key={`${ride.source ?? 'APP'}-${ride.id}`} className="ride-card" data-source={ride.source ?? 'APP'}>
               <div className="ride-card__route">
                 <span className="ride-card__zone">{tz(ride.pickupZone)}</span>
                 <span className="ride-card__arrow">→</span>
                 <span className="ride-card__zone">{tz(ride.destinationZone)}</span>
                 <StatusBadge status={ride.status} />
+                {/* Which flow this trip came from, so a street ride is never mistaken for an app ride */}
+                <span className={`badge ${ride.source === 'QR' ? 'badge--matched' : 'badge--completed'}`} style={{ fontSize: 11 }} id={`source-${ride.id}`}>
+                  {ride.source === 'QR' ? `🛺 ${t('p.history.sourceQR')}` : `📱 ${t('p.history.sourceApp')}`}
+                </span>
               </div>
               <div className="ride-card__meta">
                 <span className="ride-card__meta-item">
@@ -503,6 +533,22 @@ function HistoryTab() {
                   })}
                 </span>
               </div>
+              {ride.source === 'QR' && ride.qr && (
+                <div className="ride-block" id={`qr-details-${ride.id}`}>
+                  <div className="ride-block__line">
+                    🛺 {ride.qr.vehicleNickname} · {ride.qr.vehicleCode}
+                    {' · '}{t('qr.hist.joined', { time: new Date(ride.qr.joinedAt).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' }) })}
+                    {ride.qr.exitedAt && <>{' · '}{t(ride.qr.autoCompleted ? 'qr.status.AUTO_COMPLETED' : 'qr.hist.arrived', { time: new Date(ride.qr.exitedAt).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' }) })}</>}
+                  </div>
+                  {ride.paymentStatus === 'CASH_DUE' && (
+                    <div className="ride-block__line">💵 {t('qr.payCash', { amount: ride.paymentAmount ?? ride.estimatedFare })}</div>
+                  )}
+                  {ride.qr.driverBonus > 0 && (
+                    <div className="ride-block__line">{t('qr.hist.bonus', { amount: ride.qr.driverBonus })}</div>
+                  )}
+                  {ride.qr.autoCompleted && <div className="ride-block__line">{t('qr.autoNote')}</div>}
+                </div>
+              )}
             </div>
           ))}
         </div>

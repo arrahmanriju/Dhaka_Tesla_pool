@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { generateVehicleCode } from './utils/vehicleCode';
 import { sequelize, storagePath } from './models';
 import { recalculatePoolFares } from './utils/poolFares';
 
@@ -206,4 +207,60 @@ export async function migratePayments(): Promise<void> {
   await add('RideRequests', 'paymentMethod', "TEXT NOT NULL DEFAULT 'cash'");
   await add('RideRequests', 'paymentStatus', "TEXT NOT NULL DEFAULT 'NOT_DUE'");
   await add('RideRequests', 'paymentAmount', 'INTEGER');
+}
+
+/**
+ * Idempotent: gives every vehicle a public `vehicleCode` (the QR sticker's content and the typeable
+ * fallback ID) in a database created before the QR street-ride flow. `sequelize.sync()` never adds
+ * columns to an existing table, and SQLite cannot add a UNIQUE column with ALTER, so the column is
+ * added, existing vehicles are backfilled with fresh random codes, and the uniqueness is a separate index.
+ */
+export async function migrateVehicleCodes(): Promise<void> {
+  const [cols] = (await sequelize.query('PRAGMA table_info(`Vehicles`)')) as [{ name: string }[], unknown];
+  if (cols.length === 0) return; // fresh database: sync() creates the table with the column and its unique constraint
+  if (!cols.some((c) => c.name === 'vehicleCode')) {
+    await sequelize.query('ALTER TABLE `Vehicles` ADD COLUMN `vehicleCode` VARCHAR(255)');
+    console.log('[migrate] Vehicles: added vehicleCode column');
+  }
+  const [missing] = (await sequelize.query('SELECT `id` FROM `Vehicles` WHERE `vehicleCode` IS NULL')) as [{ id: string }[], unknown];
+  for (const { id } of missing) {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const code = generateVehicleCode();
+      const [taken] = (await sequelize.query('SELECT 1 FROM `Vehicles` WHERE `vehicleCode` = ?', { replacements: [code] })) as [unknown[], unknown];
+      if (taken.length === 0) {
+        await sequelize.query('UPDATE `Vehicles` SET `vehicleCode` = ? WHERE `id` = ?', { replacements: [code, id] });
+        break;
+      }
+    }
+  }
+  await sequelize.query('CREATE UNIQUE INDEX IF NOT EXISTS `vehicles_vehicle_code_unique` ON `Vehicles` (`vehicleCode`)');
+
+  // ONE PUBLIC ID: an active vehicle whose driver has a Tesla ID (DriverProfiles.id -> "DTP-0001") uses that
+  // Tesla ID as its vehicle code, replacing the random code an earlier version of this migration gave it.
+  // Idempotent, and it never steals a code another vehicle already holds. (DriverProfile.driverCode is
+  // computed from the id, not stored, so it is rebuilt here the same way: DTP- plus the id padded to 4.)
+  const [profiles] = (await sequelize.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'DriverProfiles'")) as [unknown[], unknown];
+  if (profiles.length > 0) {
+    const teslaId = "(SELECT 'DTP-' || printf('%04d', p.`id`) FROM `DriverProfiles` p WHERE p.`userId` = `Vehicles`.`driverId`)";
+    await sequelize.query(
+      `UPDATE \`Vehicles\` SET \`vehicleCode\` = ${teslaId} ` +
+        `WHERE \`isActive\` = 1 AND ${teslaId} IS NOT NULL AND \`vehicleCode\` != ${teslaId} ` +
+        // only ONE vehicle per driver takes the Tesla ID (the oldest active one): a code is unique
+        `AND \`id\` = (SELECT v3.\`id\` FROM \`Vehicles\` v3 WHERE v3.\`driverId\` = \`Vehicles\`.\`driverId\` AND v3.\`isActive\` = 1 ORDER BY v3.\`createdAt\` ASC, v3.\`id\` ASC LIMIT 1) ` +
+        `AND NOT EXISTS (SELECT 1 FROM \`Vehicles\` v2 WHERE v2.\`vehicleCode\` = ${teslaId} AND v2.\`id\` != \`Vehicles\`.\`id\`)`
+    );
+
+  }
+}
+
+/**
+ * Database-level guarantee behind "at most one OPEN street-ride session per vehicle": a partial unique
+ * index. The join route checks first (inside an IMMEDIATE transaction); this catches two first passengers
+ * racing to open the same vehicle's session.
+ */
+export async function ensureOneOpenQRSessionIndex(): Promise<void> {
+  await sequelize.query(
+    'CREATE UNIQUE INDEX IF NOT EXISTS `qr_ride_sessions_one_open_per_vehicle` ON `QRRideSessions` (`vehicleId`) ' +
+      "WHERE `status` = 'OPEN'"
+  );
 }

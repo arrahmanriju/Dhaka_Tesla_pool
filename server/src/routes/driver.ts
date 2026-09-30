@@ -6,6 +6,7 @@ import { isFareFinal, recalculatePoolFares } from '../utils/poolFares';
 import { recordBoarding, recordExit } from '../utils/checkpoints';
 import { settleJourney } from '../utils/journeySettlement';
 import { collectPayment } from '../utils/payments';
+import { releaseSeats } from '../utils/seats';
 import { recordRideEvent, joinedMidTrip } from '../utils/rideEvents';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 
@@ -186,10 +187,7 @@ router.patch('/rides/:id/complete', async (req: Request, res: Response) => {
 
       // Free up the seats on the vehicle, and re-estimate whoever is still on board (one fewer passenger)
       if (ride.vehicleId) {
-        await Vehicle.update(
-          { occupiedSeats: sequelize.literal(`MAX(0, occupiedSeats - ${ride.seatCount})`) },
-          { where: { id: ride.vehicleId }, transaction: t }
-        );
+        await releaseSeats(ride.vehicleId, ride.seatCount, t);
         await recalculatePoolFares(ride.vehicleId, t);
       }
     });
@@ -244,10 +242,7 @@ router.patch('/rides/:id/cancel', async (req: Request, res: Response) => {
 
       // Release seats if the ride was already assigned to a vehicle
       if (ride.vehicleId) {
-        await Vehicle.update(
-          { occupiedSeats: sequelize.literal(`MAX(0, occupiedSeats - ${ride.seatCount})`) },
-          { where: { id: ride.vehicleId }, transaction: t }
-        );
+        await releaseSeats(ride.vehicleId, ride.seatCount, t);
 
         // Someone left the pool: re-estimate everyone still in it (finished rides are never touched).
         await recalculatePoolFares(ride.vehicleId, t);

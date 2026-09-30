@@ -259,6 +259,7 @@ Two things make this hold up: the write lock makes the accepts run one after the
 
 | Situation | What guarantees it |
 |---|---|
+| Two street-ride passengers (QR flow) racing for the last seat, or the app flow and the street flow sharing one car | Both flows claim seats through the same `claimSeats()` (`utils/seats.ts`): the same single conditional `UPDATE`, inside an `IMMEDIATE` transaction; a partial unique index allows only one `OPEN` street session per vehicle |
 | A passenger must not have two active rides (two taps on *Request*) | `POST /ride-requests` checks and inserts in one `IMMEDIATE` transaction, and a **partial unique index** on `RideRequests(passengerId) WHERE status IN ('REQUESTED','MATCHED','DRIVER_ARRIVED','STARTED')` is the database-level backstop; the loser gets 409 `ACTIVE_RIDE_EXISTS` |
 | The driver completes a ride at the moment the passenger leaves it | Both use an `IMMEDIATE` transaction and a conditional update `WHERE status = 'STARTED'`; whoever runs second changes 0 rows and gets 409, so the seat is released once and the exit checkpoint is recorded once |
 | A wallet must never go negative, and a ride must be charged once | The debit is `UPDATE Users SET walletBalance = walletBalance - :fare WHERE id = :user AND walletBalance >= :fare`; 0 rows means `FAILED`, not a negative balance. The ledger has a **unique** index on `rideRequestId`, so a second debit for the same ride cannot exist |
@@ -328,6 +329,62 @@ There is **no real gateway**. Each ride has a payment method and, for wallet rid
 - **Who sees what** — a passenger reads only their **own** balance and ledger at `GET /passenger/wallet` (the caller comes from the login token; someone else's `passengerId` is a 403, no login a 401, a driver's login a 403) and their own ride's `paymentMethod`, `paymentStatus`, `paymentAmount`. **Drivers never see a wallet balance**: their responses carry a ride's `paymentMethod` and `paymentStatus` (paid / cash to collect / failed) and the amount owed, nothing else.
 - **Seed** — `npm run seed` gives Nusrat ৳1000 (pays by wallet), Rafiq ৳500 (pays cash) and Shirin **৳120** (wallet; small on purpose: a solo ৳180 fare fails and shows the cash-settlement path, while a shared ৳80 or ৳110 fare is within her balance).
 - **Existing databases** — `Users.walletBalance` (default 0) and `RideRequests.paymentMethod / paymentStatus / paymentAmount` (cash, `NOT_DUE`) are added by an idempotent startup migration, which now runs before the paisa → taka migration reads rides; `WalletTransactions` is created by `sync()`.
+
+## Street rides by QR code (drivers without a smartphone)
+
+A **separate, additional** flow for drivers who have no smartphone. The driver **never logs in and never does anything**: every step is triggered by a passenger. The normal app flow (requested → matched → started → completed, pooling, wallet payments) is untouched.
+
+**How it works**
+1. Every vehicle has a public **`vehicleCode`**: the **QR sticker's content** and the **typeable fallback** for a passenger who cannot scan. **For a vehicle whose driver has a Tesla ID (every onboarded driver) the vehicle code *is* the Tesla ID**, e.g. `DTP-0001`: the same value the app shows as *Tesla ID* on the driver's Vehicle tab and on a passenger's ride card, so the code a person sees is exactly the code the lookup accepts. (It comes from the driver profile's id and is copied into the vehicle's plate at onboarding; a startup migration keeps an onboarded active vehicle's code equal to it.) A vehicle with no driver profile gets a random 6-character code from an alphabet without look-alikes (`4KQ7M2`). Codes are unique. Input ignores case, spaces and underscores, and **a hyphen is optional**: `DTP-0001`, `dtp-0001`, `DTP0001` and `dtp 0001` all find the same vehicle. The seeded Bullet is `DTP-0001` (its QR code is its Tesla ID).
+2. A passenger opens **Street Ride**, scans or types the code and sees the vehicle and whether a ride is already open. Then they choose their own pickup and destination from the normal zone list.
+   - If the vehicle has **no `OPEN` session**, joining **creates one**. If it has one, they **join it** with their own destination. There is **no compatibility check**: the driver and passenger agreed on the street. Only **capacity** is enforced.
+3. When they get off they tap **I've arrived** (nobody else can do it for them and there is no driver confirmation anywhere). When **every** passenger has, the session becomes `CLOSED`.
+4. If nobody closes it, it is closed automatically (see the time limit below).
+5. **The ride itself is on the Active Ride page.** Joining takes the passenger straight to **Active Ride**, which shows the street ride with the same card as an app ride: pickup and destination, the fare so far, cash payment, the seats taken, and the others as "Passenger 1", "Passenger 2". No driver is tracked, so there are no Matched / Driver Arrived / Started steps and no driver block; it just reads *in progress* until the passenger taps **I've arrived**. The Street Ride page only joins a ride (if the passenger is already on one it points them to Active Ride).
+6. **When their own trip ends** (they tap *I've arrived*, or the session times out or closes) Active Ride moves on to **History**, where the finished trip is, with no "this ride has ended" message left behind. The Street Ride page is back to "scan or enter a vehicle code", ready for a new ride. (This applies the moment *their own* leg ends, even if others are still riding, so they can start another ride straight away.)
+
+**Street rides in the ride history.** A finished street trip appears in the passenger's existing ride history (`GET /passenger/rides/history`, the same list and screen as app rides), in **one list sorted by when each trip ended, newest first**. Every row has a **`source`**: `APP` (a 📱 *App ride* label) or `QR` (a 🛺 *Street ride (QR)* label), so a trip is never mistaken for the other flow. A QR row has the same fields as an app row (zones, `estimatedFare` = the final fare, `poolDiscount`, `paymentMethod` `cash` and `paymentStatus` `CASH_DUE` with `paymentAmount`, `createdAt` = when they joined, `updatedAt` = when their trip ended) plus a **`qr`** object: `vehicleCode` and nickname, `passengerNumber`, `autoCompleted` (the session timed out before they confirmed), `joinedAt` / `exitedAt`, the session's `sessionStatus` / `sessionClosedAt` / `sessionCloseReason`, and **`driverBonus`**, the bonus *their* joining earned the driver (৳10 for a second or later passenger, ৳0 for the first). Only the passenger's own trips are ever returned; co-passengers do not appear. A trip appears as soon as the passenger's own leg is done, and an app-only history looks exactly as before, plus the `source: "APP"` label.
+
+**Data.** `QRRideSession` (vehicle, `OPEN`/`CLOSED`, opened/closed times, close reason), `QRRideParticipant` (the passenger's own pickup and destination zone, `joinedAt`, status `RIDING` → `ARRIVED` or `AUTO_COMPLETED`, fare and cash amount) and `DriverBonus` (the driver's bonus ledger). There are no `DRIVER_ARRIVED` / `STARTED` states: there is no driver app to report them. Endpoints (all a logged-in **passenger**): `GET /qr/vehicles/:code`, `POST /qr/join`, `GET /qr/sessions/mine` (the ride the passenger is on **now**, or `null`), `GET /qr/sessions/:id`, `POST /qr/sessions/:id/arrived`; `GET /qr/bonus` is the driver's own bonus record.
+
+**Fares** use the same formula as the app (see *Fare Model*): the trip cost (`100 + 20 × journeyKm × seats`) spread over the journey by distance; a stretch ridden **alone** costs its share, and a stretch **shared** by `n` costs its share divided by `n`, **rounded up**, **plus ৳20**. The "checkpoints" are simply this session's **joins and exits, in order** (a join is at the passenger's pickup zone, an exit at their destination zone). A running estimate is shown while riding; the fare is final when the passenger's own journey ends. `baseFare` is their solo fare (`100 + km × 20 × seats`) and `poolDiscount` what pooling saved. Street rides are always cash and never private: the *Allow sharing* switch belongs to the app flow only.
+
+**Worked example — two passengers, different destinations.** Zone distances: Uttara–Mirpur **9 km**, Mirpur–Dhanmondi **7 km** (so Uttara → Dhanmondi is 16 km). Nusrat rides **Uttara → Dhanmondi**; Rafiq rides **Uttara → Mirpur**.
+
+| Event | Where | On board after |
+|---|---|---|
+| Nusrat scans the code and joins (opens the session) | Uttara | 1 |
+| Rafiq scans the same code and joins (**driver bonus ৳10**) | Uttara | 2 |
+| Rafiq taps *I've arrived* | Mirpur | 1 |
+| Nusrat taps *I've arrived* → session `CLOSED` | Dhanmondi | 0 |
+
+| | Stretch | Exact amount | On board | Charge |
+|---|---|---|---|---|
+| **Nusrat** (journeyKm 9 + 7 = 16, tripCost 100 + 320 = ৳420) | Uttara → Mirpur | 9/16 × 420 = 236.25; / 2 = 118.125 → 119 (up); + 20 | 2 | **৳139** |
+| | Mirpur → Dhanmondi | 7/16 × 420 = 183.75 | 1 (alone) | **৳184** |
+| | **fare** = 139 + 184 = **৳323** | (alone all the way: ৳420) | | saved ৳97 |
+| **Rafiq** (journeyKm 9, tripCost 100 + 180 = ৳280) | Uttara → Mirpur | 280 / 2 + 20 | 2 | **৳160** |
+| | **fare** = **৳160** | (alone: ৳280) | | saved ৳120 |
+
+Nusrat owes **৳323** and Rafiq **৳160**, both **in cash**; together ৳483. While both are riding the estimates are Nusrat ৳230 (2 on board for the whole 16 km: 420 / 2 + 20) and Rafiq ৳160, and the moment between two people joining in the same zone is a 0 km stretch that costs nothing.
+
+**Driver bonus.** A fixed **৳10** (`DRIVER_BONUS_PER_EXTRA_PASSENGER`) is credited to the vehicle's driver in the `DriverBonus` ledger for every passenger **beyond the first** in a session (one passenger alone earns none; three earn ৳20). It is written in the same transaction as the join and can only exist once per passenger. The driver reads it at `GET /qr/bonus` with their own login (or an admin tool can), passengers never can.
+
+**Payment is cash only** and the wallet is never touched. Why (also in the code): the driver has no app and no wallet account, so there is nobody to credit and nothing on their side to confirm a transfer. The passenger pays the driver in cash at the end and the app only records the amount owed (`CASH_DUE`). A request to pay by wallet is refused.
+
+**The time limit — 90 minutes.** There is no driver to close a stale session, so any session `OPEN` for more than **90 minutes** (`QR_SESSION_TIMEOUT_MINUTES`, an environment setting) is closed automatically with reason `TIMEOUT`, and every passenger who never confirmed becomes **`AUTO_COMPLETED`**: they are charged as if they had arrived at their destination, their seat is released, and the passenger sees why. I chose 90 because it is longer than any realistic trip across Dhaka even in bad traffic, yet short enough that a forgotten session does not keep a car "occupied" through the next trip. It is measured from when the session **opened**, as specified, so someone who joins at minute 85 has 5 minutes; a rolling "since last activity" limit would be fairer to late joiners and is a small change. When several passengers are auto-completed their exits are ordered **shortest trip first** (ties: who joined first), so a passenger with a nearby destination is not charged for riding on to a far one and back. Sweeping happens on **every street-ride request** (so it needs no timer to be correct) and once a minute in the server.
+
+**Anonymized passengers.** Like the app flow, passengers in one car see each other only as **"Passenger 1", "Passenger 2"** (join order) with whether they are still riding: never names, phones, ids, routes or fares, even though they are physically together. A passenger's fare breakdown has no zone names (they would show where the others got on and off), and passengers never see the driver's identity. Only a passenger *in* a session can read it (403 otherwise).
+
+**Kept apart from the app flow.** A street passenger is **not** a `RideRequest`: pools, checkpoints, fares, earnings and the pending list of the app flow never include them, and an app ride completing never closes or charges a street session. The **only shared state is the vehicle's seat count**, on purpose, because a seat is a seat: both flows claim and release seats through the same two functions (`claimSeats` / `releaseSeats` in `utils/seats.ts`), so a car with an app ride holding 2 of 3 seats leaves one for a street passenger and can never be over-booked across both. Each flow releases only what it claimed. A passenger cannot be in an app ride and a street ride at once (the street join is refused if they have an active app ride, and a passenger can only be in one street ride).
+
+**Concurrency.** Joining runs in one `IMMEDIATE` transaction with the shared atomic seat claim (see *Concurrency Handling*), so two passengers racing for the last seat cannot both get it, and two first passengers scanning together open **one** session between them (a partial unique index allows at most one `OPEN` session per vehicle). Joining is refused with `SESSION_CLOSED` if the passenger sends the id of a ride that has closed since they scanned, rather than quietly opening a different one.
+
+**Assumptions and limits**
+- Passengers still need an account (their identity is the login); only the *driver* is offline. The vehicle code itself is not a secret: all it lets someone do is join a ride in that car.
+- "I've arrived" means arrival **at the passenger's own destination zone**; a passenger who gets off somewhere else early is charged for the full trip they entered (a "get off here" zone, like the app's mid-trip leave, is a natural extension).
+- The passenger's own word ends their leg, and cash is settled in person; disputes are outside the app.
+- If a vehicle is used by both flows at once, route compatibility is not checked between them (only seats).
 
 ## Ride Status Page (Passenger)
 

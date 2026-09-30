@@ -487,6 +487,9 @@ function VehicleTab({ driverId }: { driverId: string }) {
             <div>
               <div className="card__title">🛺 {vehicle.modelName}</div>
               <div className="card__subtitle">{t('d.vehicle.teslaId')}: {vehicle.licensePlate}</div>
+              {vehicle.vehicleCode && (
+                <div className="card__subtitle" id="vehicle-qr-code">{t('d.vehicle.qrCode')}: <strong>{vehicle.vehicleCode}</strong></div>
+              )}
             </div>
             <span className="badge badge--matched" style={{ fontSize: 12 }}>{t('d.vehicle.active')}</span>
           </div>

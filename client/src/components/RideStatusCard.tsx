@@ -1,10 +1,11 @@
 'use client';
-import { useCallback, useEffect, useState } from 'react';
-import { passengerApi, assetUrl, ApiError, type Ride } from '@/lib/api';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { passengerApi, qrApi, assetUrl, ApiError, type Ride } from '@/lib/api';
+import { qrSessionToRide } from '@/lib/qrRide';
 import { usePreferences, useFormatApiError } from '@/lib/preferences';
 import type { TranslationKey } from '@/lib/translations';
 import { StatusBadge, StatusTimeline } from './StatusBadge';
-import { PassengerFare, SeatCount } from './UI';
+import { PassengerFare, SeatCount, Spinner } from './UI';
 
 /** How often an open ride re-reads itself. Plain polling: no websockets, and no live GPS. */
 export const RIDE_POLL_MS = 5000;
@@ -45,16 +46,24 @@ function DriverAvatar({ photoUrl }: { photoUrl: string | null }) {
  *
  * The ride re-reads itself every 5 seconds so the passenger sees someone joining or leaving, the
  * driver arriving and fare changes. Polling stops for good once the ride is COMPLETED or CANCELLED.
+ *
+ * The same card shows a street ride joined by QR code (`street`). There is no driver in that flow, so the
+ * driver steps and driver block are left out: it just reads "in progress" until the passenger taps
+ * "I've arrived". Once their own trip has ended (they tapped it, or it timed out) `street.onEnded` is called
+ * and the parent moves on: the finished trip is in History.
  */
 export function RideStatusCard({
   initial,
   onCancel,
   cancelling,
+  street,
 }: {
   initial: Ride;
   /** Asks the server to cancel; the card then re-reads the ride so it shows CANCELLED. */
   onCancel: (rideId: string) => Promise<void>;
   cancelling: boolean;
+  /** Set when this is a street ride (QR) rather than an app ride */
+  street?: { onEnded: () => void };
 }) {
   const { t, tp, tz, locale } = usePreferences();
   const formatError = useFormatApiError();
@@ -64,12 +73,23 @@ export function RideStatusCard({
   const [updatedAt, setUpdatedAt] = useState(() => new Date());
   const [connectionLost, setConnectionLost] = useState(false);
   const finished = isFinished(ride.status);
+  // The parent passes a fresh `street` object every render: keep the latest callback without restarting the polling
+  const isStreet = !!street;
+  const endedRef = useRef(street?.onEnded);
+  useEffect(() => { endedRef.current = street?.onEnded; });
+  const onEnded = useCallback(() => endedRef.current?.(), []);
 
   // Reads the ride once. Returns false when the ride can no longer be read (gone or not ours).
   const fetchLatest = useCallback(async (): Promise<boolean> => {
     try {
-      const res = await passengerApi.getRide(initial.id);
-      setRide(res.ride);
+      if (isStreet) {
+        // `mine` is null once this passenger's own trip has ended (arrived, timed out or closed)
+        const { session } = await qrApi.mine();
+        if (!session) { onEnded(); return false; }
+        setRide(qrSessionToRide(session));
+      } else {
+        setRide((await passengerApi.getRide(initial.id)).ride);
+      }
       setUpdatedAt(new Date());
       setConnectionLost(false);
       return true;
@@ -79,7 +99,7 @@ export function RideStatusCard({
       setConnectionLost(true);
       return !unreadable;
     }
-  }, [initial.id]);
+  }, [initial.id, isStreet, onEnded]);
 
   useEffect(() => {
     if (finished) return; // COMPLETED or CANCELLED: nothing more will change, so stop polling
@@ -102,6 +122,20 @@ export function RideStatusCard({
       document.removeEventListener('visibilitychange', onVisible);
     };
   }, [finished, fetchLatest]);
+
+  // Street ride: "I've arrived". Only the passenger can do it; afterwards the trip lives in History.
+  const [arriving, setArriving] = useState(false);
+  const [arriveError, setArriveError] = useState('');
+  const handleArrived = async () => {
+    setArriving(true); setArriveError('');
+    try {
+      await qrApi.arrived(initial.id);
+      onEnded();
+    } catch (err) {
+      setArriveError(formatError(err));
+      setArriving(false);
+    }
+  };
 
   const handleCancel = async () => {
     await onCancel(ride.id);
@@ -146,7 +180,19 @@ export function RideStatusCard({
         <span className="ride-card__zone">{tz(ride.pickupZone)}</span>
         <span className="ride-card__arrow">→</span>
         <span className="ride-card__zone">{tz(ride.destinationZone)}</span>
-        <StatusBadge status={ride.status} />
+        {street ? (
+          <span className="badge badge--started">
+            <span className="badge__dot badge__dot--pulse" />
+            {t('qr.status.RIDING')}
+          </span>
+        ) : (
+          <StatusBadge status={ride.status} />
+        )}
+        {street && (
+          <span className="badge badge--matched" style={{ fontSize: 11 }} id="street-source">
+            🛺 {t('p.history.sourceQR')}
+          </span>
+        )}
         {ride.allowSharing === false && (
           <span className="badge badge--matched" style={{ fontSize: 11, marginLeft: 6 }}>
             {t('p.active.private')}
@@ -155,12 +201,19 @@ export function RideStatusCard({
       </div>
 
       {/* Matched → Driver Arrived → Started → Completed (and the messages for waiting / cancelled) */}
-      <StatusTimeline
-        status={ride.status}
-        cancellationZone={ride.cancellationZone ?? null}
-        chargedFare={ride.estimatedFare}
-      />
-      {statusMessage && (
+      {street ? (
+        // No driver is tracked on a street ride: no Matched / Driver Arrived / Started steps, just "in progress"
+        <p className="ride-status__message" id="street-in-progress" role="status" aria-live="polite">
+          {t('qr.inProgress')}
+        </p>
+      ) : (
+        <StatusTimeline
+          status={ride.status}
+          cancellationZone={ride.cancellationZone ?? null}
+          chargedFare={ride.estimatedFare}
+        />
+      )}
+      {!street && statusMessage && (
         <p className="ride-status__message" id="ride-status-message" role="status" aria-live="polite">
           {t(statusMessage)}
         </p>
@@ -211,6 +264,9 @@ export function RideStatusCard({
           </div>
           {ride.joinedMidTrip && (
             <div className="ride-block__line" id="pool-joined-mid-trip">{t('rs.joinedMidTrip')}</div>
+          )}
+          {street && ride.qrPassengerNumber != null && (
+            <div className="ride-block__line" id="pool-you">{t('qr.youAre', { n: ride.qrPassengerNumber })}</div>
           )}
           {pool.otherPassengers.length > 0 && (
             <div className="ride-block__line" id="pool-others">
@@ -267,6 +323,16 @@ export function RideStatusCard({
               ? t('rs.reconnecting')
               : `${t('rs.updated', { time: updated })} · ${t('rs.autoRefresh')}`}
         </span>
+        {/* Street ride: the passenger ends their own trip; nobody else can, and no driver confirms it */}
+        {street && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'stretch', flex: 1 }}>
+            <p className="form-hint">{t('qr.arrivedHelp')}</p>
+            {arriveError && <div className="error-banner" role="alert">{arriveError}</div>}
+            <button id="street-arrived" className="btn btn--success" onClick={handleArrived} disabled={arriving}>
+              {arriving ? <><Spinner /> {t('qr.arriving')}</> : `✅ ${t('qr.arrived')}`}
+            </button>
+          </div>
+        )}
         {/* Only while cancelling is allowed (before the driver arrives) */}
         {ride.canCancel && (
           <button
