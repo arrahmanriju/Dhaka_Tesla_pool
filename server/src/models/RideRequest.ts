@@ -126,6 +126,13 @@ export class RideRequest extends Model {
   /** Where the passenger left the ride, when it ended CANCELLED_IN_TRANSIT. `estimatedFare` is then the pro-rated charge. */
   public cancellationZone!: string | null;
 
+  /** How the passenger pays: 'cash' (to the driver) or 'wallet' (TeslaPay). Chosen when the ride is requested. */
+  public paymentMethod!: string;
+  /** NOT_DUE until the journey ends, then CASH_DUE / PAID / FAILED (see utils/payments.ts). */
+  public paymentStatus!: string;
+  /** The final fare that was owed or charged (whole taka); null until the journey ends. */
+  public paymentAmount!: number | null;
+
   public status!: RideStatus;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
@@ -189,6 +196,20 @@ export const initRideRequest = (sequelize: any) => {
       },
       cancellationZone: {
         type: DataTypes.ENUM(...DHAKA_ZONES),
+        allowNull: true,
+      },
+      paymentMethod: {
+        type: DataTypes.ENUM('cash', 'wallet'),
+        allowNull: false,
+        defaultValue: 'cash',
+      },
+      paymentStatus: {
+        type: DataTypes.ENUM('NOT_DUE', 'CASH_DUE', 'PAID', 'FAILED'),
+        allowNull: false,
+        defaultValue: 'NOT_DUE',
+      },
+      paymentAmount: {
+        type: DataTypes.INTEGER, // whole taka, set when the journey ends
         allowNull: true,
       },
       status: {

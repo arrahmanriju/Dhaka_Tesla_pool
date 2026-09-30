@@ -8,6 +8,7 @@ import { DriverProfile, initDriverProfile } from './DriverProfile';
 import { RideEvent, initRideEvent } from './RideEvent';
 import { RideDecline, initRideDecline } from './RideDecline';
 import { PoolCheckpoint, initPoolCheckpoint } from './PoolCheckpoint';
+import { WalletTransaction, initWalletTransaction } from './WalletTransaction';
 
 // Setup Sequelize for SQLite
 export const storagePath = process.env.DB_STORAGE_PATH || path.join(__dirname, '../../data/database.sqlite');
@@ -26,6 +27,7 @@ initDriverProfile(sequelize);
 initRideEvent(sequelize);
 initRideDecline(sequelize);
 initPoolCheckpoint(sequelize);
+initWalletTransaction(sequelize);
 
 // Setup Associations
 User.hasMany(PasswordReset, { foreignKey: 'userId', onDelete: 'CASCADE' });
@@ -51,5 +53,8 @@ RideEvent.belongsTo(RideRequest, { foreignKey: 'rideRequestId' });
 RideRequest.hasMany(PoolCheckpoint, { foreignKey: 'rideRequestId', onDelete: 'CASCADE' });
 Vehicle.hasMany(PoolCheckpoint, { foreignKey: 'vehicleId', onDelete: 'CASCADE' });
 
-export { User, Vehicle, RideRequest, PasswordReset, DriverProfile, RideEvent, RideDecline, PoolCheckpoint };
+User.hasMany(WalletTransaction, { foreignKey: 'userId', onDelete: 'CASCADE' });
+RideRequest.hasMany(WalletTransaction, { foreignKey: 'rideRequestId', onDelete: 'CASCADE' });
+
+export { User, Vehicle, RideRequest, PasswordReset, DriverProfile, RideEvent, RideDecline, PoolCheckpoint, WalletTransaction };
 

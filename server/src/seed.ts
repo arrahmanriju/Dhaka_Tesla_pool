@@ -46,7 +46,15 @@ async function seed() {
 
     // 3. Create Passengers
     const passengers = ['Nusrat', 'Rafiq', 'Shirin'];
+    // Simulated TeslaPay wallets (whole taka) and how each one pays. Shirin's small balance is on
+    // purpose: a wallet fare above ৳120 fails and is flagged for cash settlement.
+    const wallet: Record<string, { balance: number; pays: 'cash' | 'wallet' }> = {
+      Nusrat: { balance: 1000, pays: 'wallet' },
+      Rafiq: { balance: 500, pays: 'cash' },
+      Shirin: { balance: 120, pays: 'wallet' },
+    };
     const passengerIds: string[] = [];
+    const paymentMethods: Array<'cash' | 'wallet'> = [];
     for (const [i, name] of passengers.entries()) {
       const passenger = await User.create({
         name,
@@ -54,18 +62,21 @@ async function seed() {
         email: `${name.toLowerCase()}@test.com`,
         password: defaultPassword,
         role: 'PASSENGER',
+        walletBalance: wallet[name]!.balance,
       });
       passengerIds.push(passenger.id);
-      console.log(`Created passenger ${name}`);
+      paymentMethods.push(wallet[name]!.pays);
+      console.log(`Created passenger ${name}: TeslaPay ৳${wallet[name]!.balance}, pays by ${wallet[name]!.pays}`);
     }
 
     // 4. The pool-fare story: all three want Mohakhali → Badda (a 3-seat Tesla, Jashim's Bullet).
     //    Each request starts at the solo fare; log in as Jashim, go online and accept them one
     //    by one to watch the fare split:  ৳180 alone → ৳125 each with 2 → ৳100 each with 3.
     const soloFare = calculateBaseFare('Mohakhali', 'Badda', 1);
-    for (const passengerId of passengerIds) {
+    for (const [i, passengerId] of passengerIds.entries()) {
       const ride = await RideRequest.create({
         passengerId,
+        paymentMethod: paymentMethods[i]!,
         pickupZone: 'Mohakhali',
         destinationZone: 'Badda',
         seatCount: 1,

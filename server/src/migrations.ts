@@ -184,3 +184,23 @@ export async function migrateMidTripCancellation(): Promise<void> {
   await renameColumn('RideEvents', 'lockedFare', 'fullTripEstimate'); // an early version of this feature named it lockedFare
   await add('RideEvents', 'fullTripEstimate', 'INTEGER');
 }
+
+/**
+ * Idempotent: adds the columns behind simulated payments to a database created before they existed:
+ * `Users.walletBalance` and `RideRequests.paymentMethod / paymentStatus / paymentAmount`.
+ * Existing users start with an empty wallet and existing rides are cash rides with nothing due
+ * (their journeys were settled before payments existed). The `WalletTransactions` table is created
+ * by `sequelize.sync()`.
+ */
+export async function migratePayments(): Promise<void> {
+  const add = async (table: string, column: string, type: string) => {
+    const [cols] = (await sequelize.query(`PRAGMA table_info(\`${table}\`)`)) as [{ name: string }[], unknown];
+    if (cols.length === 0 || cols.some((c) => c.name === column)) return; // fresh database, or already done
+    await sequelize.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${type}`);
+    console.log(`[migrate] ${table}: added ${column} column`);
+  };
+  await add('Users', 'walletBalance', 'INTEGER NOT NULL DEFAULT 0');
+  await add('RideRequests', 'paymentMethod', "TEXT NOT NULL DEFAULT 'cash'");
+  await add('RideRequests', 'paymentStatus', "TEXT NOT NULL DEFAULT 'NOT_DUE'");
+  await add('RideRequests', 'paymentAmount', 'INTEGER');
+}

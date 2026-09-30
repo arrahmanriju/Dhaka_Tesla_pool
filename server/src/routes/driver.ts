@@ -5,6 +5,7 @@ import { validateTransition, RideStatus, TERMINAL_STATUSES } from '../models/Rid
 import { isFareFinal, recalculatePoolFares } from '../utils/poolFares';
 import { recordBoarding, recordExit } from '../utils/checkpoints';
 import { settleJourney } from '../utils/journeySettlement';
+import { collectPayment } from '../utils/payments';
 import { recordRideEvent, joinedMidTrip } from '../utils/rideEvents';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 
@@ -167,8 +168,11 @@ router.patch('/rides/:id/complete', async (req: Request, res: Response) => {
       // walking the checkpoints from where they boarded (segment pricing, see fareCalculator.ts).
       await recordExit(ride, 'PASSENGER_DROPPED_OFF', ride.destinationZone, t);
       const settled = await settleJourney(ride, t);
+      const finalFare = settled.bill?.fare ?? ride.estimatedFare;
+      // Collect the final fare: debit the wallet by exactly this amount, or record it as owed in cash.
+      await collectPayment(ride, finalFare, t);
       await recordRideEvent(ride, 'COMPLETED', ride.status, { id: driverId, role: 'DRIVER' }, t, {
-        chargedFare: settled.bill?.fare ?? ride.estimatedFare,
+        chargedFare: finalFare,
         fullTripEstimate: settled.previousEstimate,
       });
 
@@ -189,6 +193,9 @@ router.patch('/rides/:id/complete', async (req: Request, res: Response) => {
       status: 'COMPLETED',
       fare: final?.estimatedFare,
       poolDiscount: final?.poolDiscount,
+      // Whether the payment succeeded (PAID / CASH_DUE / FAILED). The driver never sees wallet balances.
+      paymentMethod: final?.paymentMethod,
+      paymentStatus: final?.paymentStatus,
     });
   } catch (error: any) {
     if (error.message === 'NOT_STARTED') {
@@ -277,6 +284,8 @@ router.get('/rides/active', async (req: Request, res: Response) => {
       estimatedFare: r.estimatedFare,
       poolDiscount: r.poolDiscount,
       fareFinal: isFareFinal(r.status),
+      paymentMethod: r.paymentMethod,
+      paymentStatus: r.paymentStatus,
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
     }));
@@ -340,6 +349,8 @@ router.get('/rides/history', async (req: Request, res: Response) => {
         poolDiscount: r.poolDiscount,
         status: r.status,
         cancellationZone: r.cancellationZone ?? null,
+        paymentMethod: r.paymentMethod,
+        paymentStatus: r.paymentStatus,
         vehicleId: r.vehicleId,
         createdAt: r.createdAt,
         updatedAt: r.updatedAt,

@@ -1,12 +1,13 @@
 import { Router, Response, NextFunction } from 'express';
 import { Op, Transaction } from 'sequelize';
-import { sequelize, User, RideRequest, Vehicle, DriverProfile, RideEvent } from '../models';
+import { sequelize, User, RideRequest, Vehicle, DriverProfile, RideEvent, WalletTransaction } from '../models';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 import { validateTransition, RideStatus, DHAKA_ZONES } from '../models/RideRequest';
 import { isFareFinal, recalculatePoolFares } from '../utils/poolFares';
 import { shareRatePercent } from '../utils/fareCalculator';
 import { priceJourney, recordExit } from '../utils/checkpoints';
 import { settleJourney } from '../utils/journeySettlement';
+import { collectPayment } from '../utils/payments';
 import { recordRideEvent, joinedMidTrip } from '../utils/rideEvents';
 
 const router = Router();
@@ -241,6 +242,10 @@ async function enrichRide(ride: any, timeline: any[] = []) {
     canCancel: PASSENGER_CANCELLABLE.includes(ride.status as RideStatus),
     // a STARTED ride can still be left mid-route (PATCH /passenger/rides/:id/cancel-in-transit)
     canCancelInTransit: ride.status === 'STARTED',
+    // How this ride is paid, and whether it has been (the passenger's own ride only)
+    paymentMethod: ride.paymentMethod,
+    paymentStatus: ride.paymentStatus,
+    paymentAmount: ride.paymentAmount ?? null,
     cancellationZone: ride.cancellationZone ?? null,
     fareBreakdown: await billFor(ride),
     timeline,
@@ -249,6 +254,39 @@ async function enrichRide(ride: any, timeline: any[] = []) {
     updatedAt: ride.updatedAt,
   };
 }
+
+// ---------------------------------------------------------------------------
+// GET /passenger/wallet   (login required)
+// The logged-in passenger's own TeslaPay wallet: balance (whole taka) and their recent debits.
+// It is always the CALLER's wallet: the id comes from the login token, and a passengerId that is not
+// theirs is refused (ownPassenger). No other route returns a wallet balance to anyone else,
+// including drivers, who only ever see a ride's payment status.
+// ---------------------------------------------------------------------------
+router.get('/wallet', ownPassenger, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const passenger = await resolvePassenger(req.user!.id, res);
+    if (!passenger) return;
+    const transactions: any[] = await WalletTransaction.findAll({
+      where: { userId: passenger.id },
+      order: [['id', 'DESC']],
+      limit: 20,
+    });
+    res.json({
+      balance: passenger.walletBalance,
+      currency: 'BDT',
+      transactions: transactions.map((t) => ({
+        rideId: t.rideRequestId,
+        type: t.type,
+        amount: t.amount,
+        balanceAfter: t.balanceAfter,
+        at: t.createdAt,
+      })),
+    });
+  } catch (error) {
+    console.error('Passenger wallet error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 // ---------------------------------------------------------------------------
 // GET /passenger/rides/active   (login required)
@@ -303,6 +341,9 @@ router.get('/rides/history', ownPassenger, async (req: AuthenticatedRequest, res
         id: r.id,
         timeline: timelines.get(r.id) ?? [],
         cancellationZone: r.cancellationZone ?? null,
+        paymentMethod: r.paymentMethod,
+        paymentStatus: r.paymentStatus,
+        paymentAmount: r.paymentAmount ?? null,
         pickupZone: r.pickupZone,
         destinationZone: r.destinationZone,
         seatCount: r.seatCount,
@@ -416,6 +457,21 @@ router.patch('/rides/:id/cancel', ownPassenger, async (req: AuthenticatedRequest
   }
 });
 
+// The passenger's OWN payment for a ride, and their own wallet balance after it. Only ever built for the
+// logged-in passenger's ride: the wallet balance is private to them.
+async function paymentOf(rideId: string, passengerId: string) {
+  const [ride, user]: any[] = await Promise.all([
+    RideRequest.findByPk(rideId, { attributes: ['paymentMethod', 'paymentStatus', 'paymentAmount'] }),
+    User.findByPk(passengerId, { attributes: ['walletBalance'] }),
+  ]);
+  return {
+    method: ride?.paymentMethod,
+    status: ride?.paymentStatus,
+    amount: ride?.paymentAmount ?? null,
+    walletBalance: user?.walletBalance ?? 0,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // The passenger's own fare breakdown, stretch by stretch. Zone names are left out on purpose: the
 // checkpoints between a passenger's boarding and exit are where OTHER passengers boarded or got
@@ -528,6 +584,8 @@ router.patch('/rides/:id/cancel-in-transit', ownPassenger, async (req: Authentic
       }
 
       const charged = settled.bill?.fare ?? current.estimatedFare;
+      // Collect the fare for the part travelled: wallet debit by exactly this amount, or cash owed.
+      await collectPayment(current, charged, t);
       await recordRideEvent(current, 'CANCELLED_IN_TRANSIT', 'STARTED', { id: passengerId, role: 'PASSENGER' }, t, {
         cancellationZone: zone,
         chargedFare: charged,
@@ -542,6 +600,7 @@ router.patch('/rides/:id/cancel-in-transit', ownPassenger, async (req: Authentic
       status: 'CANCELLED_IN_TRANSIT',
       cancellationZone: zone,
       fare: passengerBill(result.settled.bill, result.charged, result.settled.previousEstimate),
+      payment: await paymentOf(rideId, passengerId),
     });
   } catch (error: any) {
     if (error.message === 'NOT_IN_TRANSIT') {

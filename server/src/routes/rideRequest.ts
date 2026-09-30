@@ -13,6 +13,7 @@ import { calculateBaseFare, estimateFare, shareRatePercent } from '../utils/fare
 import { isFareFinal, recalculatePoolFares } from '../utils/poolFares';
 import { checkPoolJoin, loadPool, PoolVerdict } from '../utils/pooling';
 import { recordRideEvent } from '../utils/rideEvents';
+import { DEFAULT_PAYMENT_METHOD, PAYMENT_METHODS, PaymentMethod, isPaymentMethod } from '../utils/payments';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 
 const router = Router();
@@ -38,6 +39,11 @@ function formatRide(r: any) {
     // true once the passenger's own journey has ended (COMPLETED or CANCELLED_IN_TRANSIT): only then is
     // estimatedFare the final amount. Until then it is an estimate that follows the pool.
     fareFinal: isFareFinal(r.status),
+    // Payment: how this ride is paid, and (once the journey has ended) what was owed or charged.
+    // Never a wallet balance: that is only ever returned to the passenger themselves.
+    paymentMethod: r.paymentMethod,
+    paymentStatus: r.paymentStatus,
+    paymentAmount: r.paymentAmount ?? null,
     status: r.status,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
@@ -57,6 +63,7 @@ type RideInput = {
   destinationZone: string;
   seatCount: number;
   allowSharing: boolean;
+  paymentMethod: PaymentMethod;
 };
 
 function validateRideInput(raw: {
@@ -64,6 +71,7 @@ function validateRideInput(raw: {
   destinationZone?: unknown;
   seatCount?: unknown;
   allowSharing?: unknown;
+  paymentMethod?: unknown;
 }): { fields: Record<string, string> } | { input: RideInput } {
   const fields: Record<string, string> = {};
   const isZone = (z: unknown): z is string =>
@@ -89,6 +97,11 @@ function validateRideInput(raw: {
     fields.allowSharing = 'allowSharing must be true or false.';
   }
 
+  // Payment defaults to cash when omitted; anything else must be one of the two methods.
+  if (raw.paymentMethod !== undefined && !isPaymentMethod(raw.paymentMethod)) {
+    fields.paymentMethod = `Choose a payment method: ${PAYMENT_METHODS.join(' or ')}.`;
+  }
+
   if (Object.keys(fields).length > 0) return { fields };
   return {
     input: {
@@ -96,6 +109,7 @@ function validateRideInput(raw: {
       destinationZone: raw.destinationZone as string,
       seatCount: raw.seatCount as number,
       allowSharing: raw.allowSharing === undefined ? true : (raw.allowSharing as boolean),
+      paymentMethod: raw.paymentMethod === undefined ? DEFAULT_PAYMENT_METHOD : (raw.paymentMethod as PaymentMethod),
     },
   };
 }
@@ -171,7 +185,7 @@ router.post('/', authenticateToken, async (req: AuthenticatedRequest, res: Respo
     if ('fields' in result) {
       return res.status(400).json({ error: Object.values(result.fields)[0], code: 'VALIDATION', fields: result.fields });
     }
-    const { pickupZone, destinationZone, seatCount, allowSharing } = result.input;
+    const { pickupZone, destinationZone, seatCount, allowSharing, paymentMethod } = result.input;
     const soloFare = calculateBaseFare(pickupZone, destinationZone, seatCount);
 
     // Check + insert in one transaction. The partial unique index (see migrations.ts) is the
@@ -193,6 +207,7 @@ router.post('/', authenticateToken, async (req: AuthenticatedRequest, res: Respo
           destinationZone,
           seatCount,
           allowSharing,
+          paymentMethod,
           baseFare: soloFare,
           estimatedFare: soloFare,
           poolDiscount: 0,
