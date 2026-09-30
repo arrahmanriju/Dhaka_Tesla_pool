@@ -161,8 +161,55 @@ The driver earns ৳380 + ৳200 = **৳580**. Before Rafiq boards, Nusrat's run
 #### Upgrading an existing database
 Fares used to be stored as integer paisa with a flat ৳30 pool discount. On startup the server converts stored fares to whole taka once (dividing by 100 and rounding to ৳5), re-prices any pool that has not started, and records this in the database's `user_version` so it never runs twice. A copy of the database file is saved next to it first (`database.sqlite.pre-taka-migration.bak`). The new `PoolCheckpoints` table is created automatically at startup; rides that were already `STARTED` before the upgrade have no boarding checkpoint, so they keep the fare they had. The cancellation columns are added by an idempotent startup migration (`RideEvents.lockedFare`, from an earlier version of this work, is renamed `fullTripEstimate`).
 
-### Concurrency Guarantee
-The vehicle's capacity is never exceeded, before or during a trip, even when near-simultaneous requests claim the last seat. Accepting a ride runs in one **immediate** database transaction: it takes SQLite's write lock up front, so two accepts for the same vehicle run one after the other, and the second re-reads the rides on the vehicle (including any `STARTED` one) and re-checks route compatibility under that lock. The seat claim is an **Optimistic Concurrency Atomic Update**: an `UPDATE` increments `occupiedSeats` with a `WHERE` constraint `seatCapacity >= occupiedSeats + requestedSeats`. If it changes 0 rows, capacity was exceeded by a concurrent transaction and the operation aborts before the ride is marked accepted. Mid-trip joining uses this exact same route and seat claim; there is no second copy of the logic.
+### Concurrency Handling
+
+**The problem.** Jashim's Bullet has one seat left. Rafiq's request and Shirin's request are both compatible, and two accept calls arrive at the same instant. A naive server reads "1 seat free" twice, says yes twice, and Bullet ends up carrying 4 people in 3 seats. This section explains exactly how the code prevents that, where else the same idea is used, and what would have to change at a larger scale.
+
+#### How two accepts for the last seat are resolved
+All of it is in `POST /ride-requests/:id/accept` (`server/src/routes/rideRequest.ts`), and the mid-trip join uses this same route, so there is one copy of the logic.
+
+1. **One transaction that takes the write lock first.** The accept runs inside `sequelize.transaction({ type: Transaction.TYPES.IMMEDIATE })`, which sends `BEGIN IMMEDIATE`. SQLite allows only one writer at a time, and `IMMEDIATE` grabs that write lock at the very start instead of when the first write happens. So two accepts cannot interleave: the second one waits until the first has committed or rolled back, and only then starts reading.
+2. **Read the pool inside the lock.** Because it waits its turn, the second accept sees the vehicle *after* the first one finished: the new passenger is already on board and `occupiedSeats` is already updated. The "may this passenger join?" check (`checkPoolJoin`: private rides, route direction, mid-trip road ahead) therefore runs against the true current pool, not a stale copy.
+3. **The seat claim is a single conditional `UPDATE`.** This is the actual guard:
+
+   ```sql
+   UPDATE Vehicles SET occupiedSeats = occupiedSeats + :seats
+   WHERE id = :vehicle AND seatCapacity >= occupiedSeats + :seats
+   ```
+
+   The condition and the increment are one statement, so there is no gap between "check" and "act". If the number of rows changed is **0**, the seats were not there: the code throws `CAPACITY_EXCEEDED`, the whole transaction rolls back (nothing is half-applied), and the caller gets **409 "Not enough seats available."** The rejected request stays `REQUESTED`, so another driver can still take it.
+4. **The request itself is claimed atomically.** The same transaction runs `UPDATE RideRequests SET status = 'MATCHED', ... WHERE id = :ride AND status = 'REQUESTED'`. If two *drivers* accept the same request, only one update changes a row; the other gets `ALREADY_TAKEN` (409) and its seat claim is rolled back with it.
+5. **Everything commits together**: seat count, ride status, fare re-estimate and the history event, or none of it.
+
+Two things make this hold up: the write lock makes the accepts run one after the other, and the conditional `UPDATE` keeps capacity correct even if the lock were ever taken away. Which of two simultaneous requests wins is simply whoever gets the lock first; the other is refused cleanly. This is proven by tests that fire both requests at once with `Promise.all`: `pooling.test.ts` case F, and in `midTripPooling.test.ts` two mid-trip requests racing for the last seat and for the last two seats (exactly one 200 and one 409, `occupiedSeats` never above capacity).
+
+#### The same idea, everywhere a race would cause harm
+
+| Situation | What guarantees it |
+|---|---|
+| A passenger must not have two active rides (two taps on *Request*) | `POST /ride-requests` checks and inserts in one `IMMEDIATE` transaction, and a **partial unique index** on `RideRequests(passengerId) WHERE status IN ('REQUESTED','MATCHED','DRIVER_ARRIVED','STARTED')` is the database-level backstop; the loser gets 409 `ACTIVE_RIDE_EXISTS` |
+| The driver completes a ride at the moment the passenger leaves it | Both use an `IMMEDIATE` transaction and a conditional update `WHERE status = 'STARTED'`; whoever runs second changes 0 rows and gets 409, so the seat is released once and the exit checkpoint is recorded once |
+| A wallet must never go negative, and a ride must be charged once | The debit is `UPDATE Users SET walletBalance = walletBalance - :fare WHERE id = :user AND walletBalance >= :fare`; 0 rows means `FAILED`, not a negative balance. The ledger has a **unique** index on `rideRequestId`, so a second debit for the same ride cannot exist |
+| A driver declines the same request twice | Unique index on `RideDecline(rideRequestId, driverId)`, and `findOrCreate` |
+| Two drivers onboard at once and get the same Tesla ID or NID | Database `AUTOINCREMENT` and `UNIQUE` constraints; onboarding writes are also queued in-process and retried on `SQLITE_BUSY` (`routes/onboarding.ts`) |
+
+#### What the SQLite setup means in practice, and its limits
+- **One writer for the whole database file, not one per vehicle.** Accepts for *different* vehicles also queue behind each other. That is fine for an MVP, and it is why correctness needs no application-level locking.
+- **Waiting has a limit.** Each Sequelize transaction opens its own connection, and the sqlite3 driver waits at most about **1 second** for the lock. Under heavy load a request can fail with `SQLITE_BUSY`, which the API returns as a JSON 500 that the app shows as "Something went wrong on our side, try again". The seat is never over-booked in that case; the request just did not run.
+- **Capacity is guarded by the conditional `UPDATE`, not by a schema `CHECK`.** There is no `CHECK (occupiedSeats BETWEEN 0 AND seatCapacity)` on the `Vehicles` table today.
+- **Known gap: pre-trip cancellations.** The passenger and driver *cancel* routes for a ride that has not started use ordinary (deferred) transactions and update the ride without a `WHERE status = ...` guard. If a passenger and the driver cancel the same ride at the same moment, both could release the seat (the release is floored at 0 with `MAX(0, ...)`, so it cannot go negative, but it could free a seat someone else holds). Making these two routes `IMMEDIATE` with a conditional update, as the complete/leave routes already are, would close it.
+- **The pending list is advisory.** `GET /ride-requests/pending` reads without a lock, so it can show a request that another driver takes a moment later. That is harmless: the accept above is what decides.
+
+#### What I would change at larger scale
+The design (short transaction, conditional update, unique constraints) is already the right shape; what changes is the database and a few edges.
+
+1. **Move from one SQLite file to PostgreSQL.** Writes are no longer serialised database-wide, and locking becomes **row-level**: two accepts for the *same* vehicle still queue, but accepts for different vehicles run in parallel. The conditional `UPDATE ... WHERE seatCapacity >= occupiedSeats + :seats` works unchanged (Postgres locks the row, and a waiting update re-checks the `WHERE` against the committed value). If the pool needs to be read and checked first, take the row lock explicitly with `SELECT ... FROM vehicles WHERE id = :vehicle FOR UPDATE` at the start of the transaction, which is the Postgres equivalent of `BEGIN IMMEDIATE` but scoped to one vehicle.
+2. **Add the constraints the database can enforce itself:** `CHECK (occupied_seats >= 0 AND occupied_seats <= seat_capacity)` so a bug can never over-book, and keep the partial unique index (Postgres supports it as is).
+3. **Retry instead of failing.** Under load Postgres can abort a transaction (deadlock `40P01`, serialization failure `40001`). Wrap the accept in a short bounded retry, and give clients an idempotency key so a retried tap cannot claim two seats.
+4. **A connection pool, and no in-process state.** SQLite opens a connection per transaction; Postgres needs a pool (and PgBouncer at scale). The onboarding write queue lives in one Node process and would not protect several API servers; the unique constraints already do, so the queue can go.
+5. **No distributed lock for seats.** With one authoritative database, a Redis or ZooKeeper lock adds a second thing that can fail or expire mid-request and is not needed: the row lock plus the conditional update is stronger. A distributed lock (or Postgres advisory locks, `pg_advisory_xact_lock(vehicle)`) only earns its place for work that spans services or must not run twice at all, such as a payout job, and there it should guard the *job*, not the seat count.
+6. **Scale reads and dispatch separately.** The pending list currently loads every waiting request and filters it in application code. At scale that becomes an indexed, geo-partitioned query, and offering one request to one driver at a time (`SELECT ... FOR UPDATE SKIP LOCKED` on a queue table) would stop many drivers from racing for it in the first place. A high-traffic city could also be sharded by region so each shard has one writer.
+7. **Keep testing it the same way.** The `Promise.all` race tests already in the suite are the right shape; against Postgres they would run with real parallel connections and would be the first thing to run after the migration.
 
 ## Passenger Cancellation Policy
 
