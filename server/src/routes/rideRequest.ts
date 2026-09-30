@@ -7,6 +7,7 @@ import {
   MAX_SEATS_PER_RIDE,
   MIN_SEATS_PER_RIDE,
   POOL_JOINABLE_STATUSES,
+  TERMINAL_STATUSES,
 } from '../models/RideRequest';
 import { calculateBaseFare, estimateFare, shareRatePercent } from '../utils/fareCalculator';
 import { isFareLocked, recalculatePoolFares } from '../utils/poolFares';
@@ -477,7 +478,7 @@ router.get('/:id/pool-info', authenticateToken, async (req: AuthenticatedRequest
     const poolRides: any[] = await RideRequest.findAll({
       where: {
         vehicleId: ride.vehicleId,
-        status: { [Op.notIn]: ['CANCELLED', 'COMPLETED'] },
+        status: { [Op.notIn]: [...TERMINAL_STATUSES] },
       },
     });
 

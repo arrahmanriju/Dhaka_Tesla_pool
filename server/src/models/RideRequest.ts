@@ -26,13 +26,14 @@ export const ACTIVE_RIDE_STATUSES = ['REQUESTED', 'MATCHED', 'DRIVER_ARRIVED', '
  * Ride status state machine:
  *   REQUESTED → MATCHED → DRIVER_ARRIVED → STARTED → COMPLETED
  *                    ↓            ↓           ↓
- *                CANCELLED    CANCELLED   CANCELLED
+ *                CANCELLED    CANCELLED   CANCELLED_IN_TRANSIT
  *
  * Allowed transitions:
  *   REQUESTED     → MATCHED        (driver accepts the ride)
  *   MATCHED       → DRIVER_ARRIVED (driver marks arrived at pickup)
  *   DRIVER_ARRIVED→ STARTED        (driver starts the trip)
  *   STARTED       → COMPLETED      (driver completes the trip)
+ *   STARTED       → CANCELLED_IN_TRANSIT (passenger leaves mid-route, at a zone they name)
  *   REQUESTED     → CANCELLED      (passenger or driver cancels before match)
  *   MATCHED       → CANCELLED      (driver or passenger cancels after match)
  *   DRIVER_ARRIVED→ CANCELLED      (rare edge case — e.g. no-show)
@@ -45,7 +46,8 @@ export type RideStatus =
   | 'DRIVER_ARRIVED'
   | 'STARTED'
   | 'COMPLETED'
-  | 'CANCELLED';
+  | 'CANCELLED'
+  | 'CANCELLED_IN_TRANSIT';
 
 export const RIDE_STATUS_VALUES: RideStatus[] = [
   'REQUESTED',
@@ -54,6 +56,7 @@ export const RIDE_STATUS_VALUES: RideStatus[] = [
   'STARTED',
   'COMPLETED',
   'CANCELLED',
+  'CANCELLED_IN_TRANSIT',
 ];
 
 /**
@@ -63,15 +66,23 @@ export const RIDE_STATUS_VALUES: RideStatus[] = [
  */
 export const POOL_JOINABLE_STATUSES: RideStatus[] = ['MATCHED', 'DRIVER_ARRIVED', 'STARTED'];
 
+/**
+ * Statuses a ride can never leave. CANCELLED_IN_TRANSIT is different from CANCELLED: the passenger
+ * was picked up and travelled part of the route, so it is a real (part-)trip in the history, with a
+ * pro-rated fare, not a request that never happened.
+ */
+export const TERMINAL_STATUSES: RideStatus[] = ['COMPLETED', 'CANCELLED', 'CANCELLED_IN_TRANSIT'];
+
 /** Returns null if the transition is allowed; an error string if not. */
 export function validateTransition(from: RideStatus, to: RideStatus): string | null {
   const allowed: Record<RideStatus, RideStatus[]> = {
     REQUESTED:      ['MATCHED', 'CANCELLED'],
     MATCHED:        ['DRIVER_ARRIVED', 'CANCELLED'],
     DRIVER_ARRIVED: ['STARTED', 'CANCELLED'],
-    STARTED:        ['COMPLETED'],
+    STARTED:        ['COMPLETED', 'CANCELLED_IN_TRANSIT'],
     COMPLETED:      [],
     CANCELLED:      [],
+    CANCELLED_IN_TRANSIT: [],
   };
 
   const allowed_targets = allowed[from] ?? [];

@@ -275,7 +275,7 @@ router.get('/rides/history', ownPassenger, async (req: AuthenticatedRequest, res
     const history = await RideRequest.findAll({
       where: {
         passengerId,
-        status: { [Op.in]: ['COMPLETED', 'CANCELLED'] },
+        status: { [Op.in]: ['COMPLETED', 'CANCELLED', 'CANCELLED_IN_TRANSIT'] },
       },
       order: [['updatedAt', 'DESC']],
     });

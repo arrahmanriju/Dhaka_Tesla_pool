@@ -153,7 +153,7 @@ export async function migrateFaresToTaka(): Promise<void> {
   }
 
   const [pools] = (await sequelize.query(
-    "SELECT DISTINCT `vehicleId` FROM `RideRequests` WHERE `vehicleId` IS NOT NULL AND `status` NOT IN ('CANCELLED', 'COMPLETED')",
+    "SELECT DISTINCT `vehicleId` FROM `RideRequests` WHERE `vehicleId` IS NOT NULL AND `status` NOT IN ('CANCELLED', 'CANCELLED_IN_TRANSIT', 'COMPLETED')",
   )) as [{ vehicleId: string }[], unknown];
   for (const { vehicleId } of pools) await recalculatePoolFares(vehicleId);
   console.log(`[migrate] RideRequests: fares converted to whole taka (${pools.length} open pool(s) re-priced)`);

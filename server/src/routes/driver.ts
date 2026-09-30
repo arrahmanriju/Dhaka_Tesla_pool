@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { Op } from 'sequelize';
 import { sequelize, User, Vehicle, RideRequest, DriverProfile, RideEvent } from '../models';
-import { validateTransition, RideStatus } from '../models/RideRequest';
+import { validateTransition, RideStatus, TERMINAL_STATUSES } from '../models/RideRequest';
 import { isFareLocked, recalculatePoolFares } from '../utils/poolFares';
 import { recordRideEvent, joinedMidTrip } from '../utils/rideEvents';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
@@ -291,7 +291,7 @@ router.get('/rides/history', async (req: Request, res: Response) => {
     const history = await RideRequest.findAll({
       where: {
         driverId,
-        status: ['COMPLETED', 'CANCELLED'],
+        status: ['COMPLETED', 'CANCELLED', 'CANCELLED_IN_TRANSIT'],
       },
       order: [['updatedAt', 'DESC']],
     });
@@ -336,7 +336,7 @@ router.get('/rides/pool', async (req: Request, res: Response) => {
     const poolRides: any[] = await RideRequest.findAll({
       where: {
         vehicleId: vehicle.id,
-        status: { [Op.notIn]: ['CANCELLED', 'COMPLETED'] },
+        status: { [Op.notIn]: [...TERMINAL_STATUSES] },
       },
       order: [['createdAt', 'ASC']],
     });

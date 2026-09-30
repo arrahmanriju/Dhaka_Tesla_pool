@@ -1,6 +1,6 @@
 import { Op, Transaction } from 'sequelize';
 import { RideEvent, RideRequest } from '../models';
-import { RideStatus } from '../models/RideRequest';
+import { RideStatus, TERMINAL_STATUSES } from '../models/RideRequest';
 
 /**
  * Appends one row to the ride's lifecycle history. Call it inside the transaction that changed the
@@ -17,7 +17,7 @@ export async function recordRideEvent(
   let ridersOnboard = 0;
   if (ride.vehicleId) {
     const onVehicle = await RideRequest.findAll({
-      where: { vehicleId: ride.vehicleId, status: { [Op.notIn]: ['CANCELLED', 'COMPLETED'] } },
+      where: { vehicleId: ride.vehicleId, status: { [Op.notIn]: [...TERMINAL_STATUSES] } },
       attributes: ['id', 'status'],
       transaction,
     });
