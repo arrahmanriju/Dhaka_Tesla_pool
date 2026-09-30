@@ -18,7 +18,7 @@ export function AppNav() {
     <nav className="app-nav">
       <div className="app-nav__inner">
         <div className="app-nav__brand">
-          <div className="app-nav__brand-icon">⚡</div>
+          <div className="app-nav__brand-icon">🛺</div>
           <span>{t('app.name')}</span>
         </div>
         {user && (

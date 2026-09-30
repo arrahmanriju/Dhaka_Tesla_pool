@@ -50,7 +50,7 @@ export default function AuthPage() {
       <div className="auth-card animate-in">
         {/* Brand */}
         <div className="auth-card__brand">
-          <div className="auth-card__brand-icon">⚡</div>
+          <div className="auth-card__brand-icon">🛺</div>
           <span className="auth-card__brand-name">{t('app.name')}</span>
         </div>
 
