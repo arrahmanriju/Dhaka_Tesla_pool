@@ -170,3 +170,62 @@ export function estimateFare(
   }
   return { baseFare, fare: baseFare, poolFare: tiers[0]?.fare ?? null, tiers };
 }
+
+// ---------------------------------------------------------------------------
+// prorateFare — what a passenger pays when they leave a STARTED ride at a zone of their choice
+//
+// Uses the SAME distance table and per-km rate as the original estimate, only measured from the
+// pickup to the cancellation zone instead of to the original destination:
+//
+//   fare = baseCharge + distanceCharge − poolDiscount
+//     baseCharge     = ৳100 (BASE_FARE_BDT)
+//     distanceCharge = distanceKm(pickup → cancellationZone) × ৳20 × seatCount
+//     poolDiscount   = the discount quoted at match time, in taka, unchanged
+//
+// (baseCharge + distanceCharge, rounded to the nearest ৳5, is exactly calculateBaseFare() for the
+// shorter trip. The stored `baseFare` column is that whole "solo fare", not just the ৳100.)
+//
+// Two safety limits so the number is always sensible:
+//   • never below ৳0 (a large pool discount on a long trip cannot make a short one negative), and
+//   • never above the fare the passenger had locked for the full trip: leaving early must not
+//     cost more than staying (zone distances are a table, not geometry, so a zone can be "farther"
+//     than the destination).
+// ---------------------------------------------------------------------------
+export interface ProRatedFare {
+  baseCharge: number;
+  distanceKm: number;
+  distanceCharge: number;
+  /** baseCharge + distanceCharge, rounded to the nearest ৳5: the solo fare for the part travelled */
+  grossFare: number;
+  poolDiscount: number;
+  /** What the passenger is charged (whole taka) */
+  fare: number;
+  /** true when the ৳0 floor or the locked-fare ceiling changed the result */
+  limited: boolean;
+}
+
+export function prorateFare(
+  pickup: string,
+  cancellationZone: string,
+  seatCount: number,
+  poolDiscount: number,
+  lockedFare: number
+): ProRatedFare {
+  if (!DHAKA_ZONES.includes(pickup as any) || !DHAKA_ZONES.includes(cancellationZone as any)) {
+    throw new Error('Invalid zone');
+  }
+  const distanceKm = getDistance(pickup as DhakaZone, cancellationZone as DhakaZone);
+  const distanceCharge = distanceKm * RATE_PER_KM_PER_SEAT_BDT * seatCount;
+  const grossFare = roundToNearest5(BASE_FARE_BDT + distanceCharge);
+  const net = grossFare - poolDiscount;
+  const fare = Math.min(Math.max(net, 0), lockedFare);
+  return {
+    baseCharge: BASE_FARE_BDT,
+    distanceKm,
+    distanceCharge,
+    grossFare,
+    poolDiscount,
+    fare,
+    limited: fare !== net,
+  };
+}
