@@ -4,7 +4,7 @@ import {
   QRError,
   closeStaleSessions,
   getDriverBonus,
-  getLatestSessionView,
+  getActiveSessionView,
   getSessionView,
   joinSession,
   markArrived,
@@ -64,10 +64,12 @@ router.post('/join', passengerOnly, handle(async (req, res) => {
   res.status(201).json({ session: await getSessionView(sessionId, req.user!.id) });
 }));
 
-// GET /qr/sessions/mine : the passenger's latest street ride (open or finished), or { session: null }
+// GET /qr/sessions/mine : the street ride the passenger is on right now, or { session: null }. A ride that has
+// ended for them is NOT returned: the Street Ride page resets to "scan or enter a code", and the finished
+// trip is in GET /passenger/rides/history (with source "QR").
 router.get('/sessions/mine', passengerOnly, handle(async (req, res) => {
   await closeStaleSessions();
-  res.json({ session: await getLatestSessionView(req.user!.id) });
+  res.json({ session: await getActiveSessionView(req.user!.id) });
 }));
 
 // GET /qr/sessions/:id : one session, only for a passenger who is in it (403 for anyone else)

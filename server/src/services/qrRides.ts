@@ -255,6 +255,14 @@ export async function joinSession(input: JoinInput): Promise<{ sessionId: string
         throw new QRError(409, 'SESSION_CLOSED', 'This ride has already ended. Scan the code again to start a new one.');
       }
     }
+    // Someone who already finished their leg of THIS still-open ride cannot join it a second time (one place per
+    // session); a clear message beats a database error. They can start a new ride once this one has closed.
+    if (session) {
+      const finishedHere = await QRRideParticipant.findOne({ where: { sessionId: session.id, passengerId: input.passengerId }, transaction: t });
+      if (finishedHere) {
+        throw new QRError(409, 'ALREADY_IN_THIS_RIDE', "You've already finished your trip in this vehicle's current ride. You can start a new one once it ends.");
+      }
+    }
     if (!session) session = await QRRideSession.create({ vehicleId: vehicle.id, openedAt: now }, { transaction: t });
 
     // Capacity: the same atomic claim the app flow uses. No claim, no join (and the transaction rolls back).
@@ -383,10 +391,77 @@ export async function getSessionView(sessionId: string, viewerId: string) {
   };
 }
 
-/** The passenger's most recent street ride (open or finished), or null. */
-export async function getLatestSessionView(passengerId: string) {
-  const last = await QRRideParticipant.findOne({ where: { passengerId }, order: [['joinedAt', 'DESC'], ['joinSeq', 'DESC']] });
-  return last ? getSessionView(last.sessionId, passengerId) : null;
+/**
+ * The street ride the passenger is on RIGHT NOW, or null. Once their own leg has ended (they tapped "I've
+ * arrived", or the session timed out, or it closed) it is not an active ride any more: the Street Ride page
+ * goes back to "scan or enter a vehicle code", and the trip lives in the passenger's ride history
+ * (getQRHistory). (A RIDING participant only ever exists in an OPEN session.)
+ */
+export async function getActiveSessionView(passengerId: string) {
+  const riding = await QRRideParticipant.findOne({ where: { passengerId, status: 'RIDING' } });
+  return riding ? getSessionView(riding.sessionId, passengerId) : null;
+}
+
+/**
+ * The passenger's FINISHED street trips, shaped like the app's ride-history rows so the one history list
+ * (GET /passenger/rides/history) can show both. `source: 'QR'` tells them apart from `'APP'` rides, and
+ * `qr` carries what only a street trip has. `updatedAt` is when the passenger's own trip ended, the date the
+ * list is sorted by. Only this passenger's own trips: co-passengers never appear, and `driverBonus` is the
+ * bonus THEIR joining earned the driver (10 for a second or later passenger, 0 for the first).
+ */
+export async function getQRHistory(passengerId: string) {
+  const trips = await QRRideParticipant.findAll({
+    where: { passengerId, status: { [Op.in]: ['ARRIVED', 'AUTO_COMPLETED'] } },
+    order: [['exitedAt', 'DESC']],
+  });
+  if (trips.length === 0) return [];
+  const sessions = await QRRideSession.findAll({ where: { id: { [Op.in]: trips.map((t) => t.sessionId) } } });
+  const vehicles = await Vehicle.findAll({
+    where: { id: { [Op.in]: sessions.map((s) => s.vehicleId) } },
+    attributes: ['id', 'vehicleCode', 'modelName'],
+  });
+  const bonuses = await DriverBonus.findAll({ where: { participantId: { [Op.in]: trips.map((t) => t.id) } } });
+  const sessionById = new Map(sessions.map((s) => [s.id, s]));
+  const vehicleById = new Map(vehicles.map((v) => [v.id, v]));
+  const bonusByTrip = new Map(bonuses.map((b) => [b.participantId, b.amount]));
+
+  return trips.map((p) => {
+    const session = sessionById.get(p.sessionId)!;
+    const vehicle = vehicleById.get(session.vehicleId);
+    return {
+      id: p.id,
+      source: 'QR' as const,
+      pickupZone: p.pickupZone,
+      destinationZone: p.destinationZone,
+      seatCount: p.seatCount,
+      baseFare: p.baseFare,
+      estimatedFare: p.finalFare ?? 0, // the final fare, like an app ride's estimatedFare once it has ended
+      poolDiscount: p.poolDiscount ?? 0,
+      fareFinal: true,
+      status: 'COMPLETED' as const, // the passenger's trip is complete (see qr.autoCompleted for how it ended)
+      cancellationZone: null,
+      paymentMethod: 'cash' as const,
+      paymentStatus: p.paymentStatus,
+      paymentAmount: p.paymentAmount,
+      timeline: [],
+      vehicleId: session.vehicleId,
+      createdAt: p.joinedAt,
+      updatedAt: p.exitedAt ?? p.joinedAt,
+      qr: {
+        sessionId: session.id,
+        passengerNumber: p.passengerNumber,
+        autoCompleted: p.status === 'AUTO_COMPLETED',
+        joinedAt: p.joinedAt,
+        exitedAt: p.exitedAt,
+        sessionStatus: session.status,
+        sessionClosedAt: session.closedAt,
+        sessionCloseReason: session.closeReason,
+        vehicleCode: vehicle?.vehicleCode ?? null,
+        vehicleNickname: vehicle?.modelName ?? null,
+        driverBonus: bonusByTrip.get(p.id) ?? 0,
+      },
+    };
+  });
 }
 
 /** What a passenger sees after scanning, before joining. Reveals nothing about the driver. */
