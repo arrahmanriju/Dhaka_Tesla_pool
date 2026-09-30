@@ -37,7 +37,8 @@ export function qrSessionToRide(session: QRSession): Ride {
     pool: {
       isShared: others.length > 0,
       poolSize: others.length + 1,
-      otherPassengers: others.map((p) => ({ firstName: p.label })),
+      otherPassengers: others.map((p) => ({ label: p.label, number: Number(p.label.replace(/\D/g, '')) })),
+      yourNumber: you.passengerNumber,
       seatsTaken,
       seatCapacity: capacity,
     },
@@ -47,6 +48,5 @@ export function qrSessionToRide(session: QRSession): Ride {
     createdAt: you.joinedAt,
     updatedAt: you.joinedAt,
     source: 'QR',
-    qrPassengerNumber: you.passengerNumber,
   };
 }
