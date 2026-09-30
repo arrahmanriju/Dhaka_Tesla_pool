@@ -91,7 +91,7 @@ describe('Ride Request API and Logic', () => {
   });
 
   describe('Fares once a second passenger is matched', () => {
-    it('quotes both the shared rate: 100 + 40 × 70% = 128 → ৳130 each (the ৳100 base is not discounted)', async () => {
+    it('quotes both the shared fare: 140 / 2 + 20 = ৳90 each', async () => {
       const driver = (await User.create({ name: 'D', email: 'dq@test.com', password: 'pwd', role: 'DRIVER' })).toJSON() as any;
       await Vehicle.create({ driverId: driver.id, modelName: 'Car', seatCapacity: 4, licensePlate: 'CAR-Q1' });
       const a = (await User.create({ name: 'A', email: 'aq@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
@@ -103,7 +103,7 @@ describe('Ride Request API and Logic', () => {
 
       for (const id of [ra, rb]) {
         const r = (await request(app).get(`/passenger/rides/${id === ra ? ra : rb}`).set(asUser(id === ra ? a.id : b.id))).body.ride;
-        expect(r).toMatchObject({ baseFare: 140, estimatedFare: 130, poolDiscount: 10, fareFinal: false });
+        expect(r).toMatchObject({ baseFare: 140, estimatedFare: 90, poolDiscount: 50, fareFinal: false });
       }
     });
   });
