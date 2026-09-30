@@ -1,20 +1,97 @@
 import { DhakaZone, DHAKA_ZONES, MAX_SEATS_PER_RIDE } from '../models/RideRequest';
 
 // ---------------------------------------------------------------------------
-// Zone distance matrix (km) — Dhaka areas, symmetric
+// ZONE DISTANCES (km), and the rule that keeps them consistent
+//
+// Every fare is built from distances (tripCost = 100 + 20 × km × seats, and a journey's segments split
+// that cost by their km), so the distances must add up the way roads do. They are therefore NOT a free-form
+// table of guesses: DIRECT_KM below lists the direct road distance between zones, and the distances the
+// fare code actually uses (ZONE_KM) are derived from it under two rules that are checked when the server
+// starts and again by zoneDistances.test.ts:
+//
+//   1. TRIANGLE INEQUALITY. d(A, C) ≤ d(A, B) + d(B, C) for every three zones. Going through a zone never
+//      beats the direct road, so a detour can only cost the same or more. The table is closed under this
+//      rule when it is built (shortest paths, Floyd–Warshall), so an entry that is longer than a path through
+//      other zones is shortened to that path instead of silently leaving a shortcut.
+//   2. CORRIDORS ARE EXACTLY ADDITIVE. ROAD_CORRIDORS lists chains of zones that genuinely lie on one road,
+//      in order. For any A, B, C in a corridor (A before B before C), d(A, B) + d(B, C) = d(A, C) exactly.
+//      So a journey Gulshan → Mohakhali → Dhanmondi costs the same as Gulshan → Dhanmondi direct
+//      (3 + 7 = 10 km, ৳100 + 10 × 20 = ৳300 either way). If the table is edited so a corridor stops adding
+//      up, the server refuses to start.
+//
+// A zone that is NOT on the road between two others is a detour: the sum through it is longer, never shorter.
+// isOnRoute(a, b, c) says whether b lies on a shortest route from a to c (the sum equals the direct distance).
 // ---------------------------------------------------------------------------
-const DISTANCE_MATRIX: Record<string, Record<string, number>> = {
+const DIRECT_KM: Record<string, Record<string, number>> = {
   Gulshan:      { Banani: 2, Dhanmondi: 10, Uttara: 12, Mirpur: 9, Motijheel: 8, Mohammadpur: 11, Badda: 3, Mohakhali: 3, 'Gulshan 1': 1 },
   Banani:       { Gulshan: 2, Dhanmondi: 9, Uttara: 10, Mirpur: 8, Motijheel: 9, Mohammadpur: 10, Badda: 4, Mohakhali: 2, 'Gulshan 1': 3 },
-  Dhanmondi:    { Gulshan: 10, Banani: 9, Uttara: 16, Mirpur: 7, Motijheel: 6, Mohammadpur: 3, Badda: 11, Mohakhali: 8, 'Gulshan 1': 10 },
-  Uttara:       { Gulshan: 12, Banani: 10, Dhanmondi: 16, Mirpur: 9, Motijheel: 18, Mohammadpur: 15, Badda: 14, Mohakhali: 11, 'Gulshan 1': 12 },
+  Dhanmondi:    { Gulshan: 10, Banani: 9, Uttara: 16, Mirpur: 7, Motijheel: 6, Mohammadpur: 3, Badda: 11, Mohakhali: 7, 'Gulshan 1': 10 },
+  Uttara:       { Gulshan: 12, Banani: 10, Dhanmondi: 16, Mirpur: 9, Motijheel: 18, Mohammadpur: 14, Badda: 14, Mohakhali: 11, 'Gulshan 1': 12 },
   Mirpur:       { Gulshan: 9, Banani: 8, Dhanmondi: 7, Uttara: 9, Motijheel: 12, Mohammadpur: 5, Badda: 10, Mohakhali: 7, 'Gulshan 1': 9 },
   Motijheel:    { Gulshan: 8, Banani: 9, Dhanmondi: 6, Uttara: 18, Mirpur: 12, Mohammadpur: 8, Badda: 9, Mohakhali: 9, 'Gulshan 1': 8 },
-  Mohammadpur:  { Gulshan: 11, Banani: 10, Dhanmondi: 3, Uttara: 15, Mirpur: 5, Motijheel: 8, Badda: 12, Mohakhali: 9, 'Gulshan 1': 11 },
+  Mohammadpur:  { Gulshan: 11, Banani: 10, Dhanmondi: 3, Uttara: 14, Mirpur: 5, Motijheel: 8, Badda: 12, Mohakhali: 9, 'Gulshan 1': 11 },
   Badda:        { Gulshan: 3, Banani: 4, Dhanmondi: 11, Uttara: 14, Mirpur: 10, Motijheel: 9, Mohammadpur: 12, Mohakhali: 4, 'Gulshan 1': 3 },
-  Mohakhali:    { Gulshan: 3, Banani: 2, Dhanmondi: 8, Uttara: 11, Mirpur: 7, Motijheel: 9, Mohammadpur: 9, Badda: 4, 'Gulshan 1': 4 },
+  Mohakhali:    { Gulshan: 3, Banani: 2, Dhanmondi: 7, Uttara: 11, Mirpur: 7, Motijheel: 9, Mohammadpur: 9, Badda: 4, 'Gulshan 1': 4 },
   'Gulshan 1':  { Gulshan: 1, Banani: 3, Dhanmondi: 10, Uttara: 12, Mirpur: 9, Motijheel: 8, Mohammadpur: 11, Badda: 3, Mohakhali: 4 },
 };
+
+/**
+ * Chains of zones that lie on one road, in order. Along a corridor the distances add up exactly (rule 2).
+ * Gulshan → Mohakhali → Dhanmondi is the example: 3 + 7 = 10 = Gulshan → Dhanmondi.
+ */
+export const ROAD_CORRIDORS: ReadonlyArray<readonly string[]> = [
+  ['Gulshan', 'Mohakhali', 'Dhanmondi'],
+  ['Uttara', 'Mirpur', 'Dhanmondi'],
+  ['Uttara', 'Mirpur', 'Mohammadpur'],
+  ['Uttara', 'Banani', 'Gulshan'],
+  ['Badda', 'Banani', 'Uttara'],
+  ['Banani', 'Gulshan', 'Gulshan 1'],
+  ['Gulshan 1', 'Gulshan', 'Mohakhali'],
+];
+
+/** The distances the fare code uses: DIRECT_KM made symmetric and closed under the triangle inequality. */
+function buildZoneKm(direct: Record<string, Record<string, number>>): Record<string, Record<string, number>> {
+  const zones = Object.keys(direct);
+  const km: Record<string, Record<string, number>> = {};
+  for (const a of zones) {
+    km[a] = {};
+    for (const b of zones) {
+      if (a === b) { km[a]![b] = 0; continue; }
+      const ab = direct[a]?.[b];
+      const ba = direct[b]?.[a];
+      if (ab === undefined && ba === undefined) throw new Error(`No distance for ${a} – ${b}`);
+      if (ab !== undefined && ba !== undefined && ab !== ba) throw new Error(`${a} – ${b} is ${ab} km one way and ${ba} km the other`);
+      const d = (ab ?? ba)!;
+      if (!Number.isInteger(d) || d < 1) throw new Error(`${a} – ${b} must be a whole number of km, at least 1`);
+      km[a]![b] = d;
+    }
+  }
+  // Shortest paths: nothing is ever longer than the way through another zone (rule 1)
+  for (const k of zones) for (const i of zones) for (const j of zones) {
+    if (km[i]![k]! + km[k]![j]! < km[i]![j]!) km[i]![j] = km[i]![k]! + km[k]![j]!;
+  }
+  return km;
+}
+
+const ZONE_KM = buildZoneKm(DIRECT_KM);
+
+// Rule 2, checked at start-up: a corridor that does not add up is a bug in the table, not a rounding matter.
+for (const corridor of ROAD_CORRIDORS) {
+  for (let i = 0; i < corridor.length; i++) for (let j = i + 1; j < corridor.length; j++) for (let k = j + 1; k < corridor.length; k++) {
+    const [a, b, c] = [corridor[i]!, corridor[j]!, corridor[k]!];
+    if (ZONE_KM[a]![b]! + ZONE_KM[b]![c]! !== ZONE_KM[a]![c]!) {
+      throw new Error(`Zone distances are inconsistent: ${a} → ${b} → ${c} is ${ZONE_KM[a]![b]} + ${ZONE_KM[b]![c]} km, but ${a} → ${c} is ${ZONE_KM[a]![c]} km`);
+    }
+  }
+}
+
+/** Does `via` lie on a shortest route from `from` to `to`? (the two legs add up to the direct distance) */
+export function isOnRoute(from: string, via: string, to: string): boolean {
+  const d = (x: string, y: string) => (x === y ? 0 : ZONE_KM[x]?.[y]);
+  const [ab, bc, ac] = [d(from, via), d(via, to), d(from, to)];
+  if (ab === undefined || bc === undefined || ac === undefined) throw new Error('Invalid zone');
+  return ab + bc === ac;
+}
 
 // ---------------------------------------------------------------------------
 // Fare constants — all money in this app is WHOLE TAKA (integers, never paisa)
@@ -36,9 +113,9 @@ export const MAX_QUOTED_POOL_SIZE = 3;
 // ---------------------------------------------------------------------------
 function getDistance(pickup: DhakaZone, dropoff: DhakaZone): number {
   if (pickup === dropoff) return 1; // 1 km minimum
-  return DISTANCE_MATRIX[pickup]?.[dropoff]
-    ?? DISTANCE_MATRIX[dropoff]?.[pickup]
-    ?? 8; // fallback default
+  const km = ZONE_KM[pickup]?.[dropoff];
+  if (km === undefined) throw new Error('Invalid zone');
+  return km;
 }
 
 // ---------------------------------------------------------------------------
