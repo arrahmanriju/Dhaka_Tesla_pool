@@ -70,6 +70,27 @@ Passengers may cancel their ride only while it is in one of these states:
 | `COMPLETED` | ❌ No | Terminal state — cannot undo. |
 | `CANCELLED` | ❌ No | Already cancelled. |
 
+## Ride Status Page (Passenger)
+
+The passenger's **Active Rides** tab is the ride status page. Once a driver accepts the ride it shows:
+
+- **Driver & vehicle** — the driver's name and photo (a placeholder when they have none), their phone number with a tap-to-call button (`tel:` link), and the vehicle as `Bullet · DTP-0001` (nickname · Tesla ID).
+- **Pool** — `Shared ride · 1 other passenger` or `Just you`, seats taken (`2 of 3 seats taken`), and the other passengers by **first name only**.
+- **Progress** — a step tracker, Matched → Driver Arrived → Started → Completed, with the current step highlighted; a waiting message while the ride is still `REQUESTED`; and a clear notice when it is `CANCELLED`.
+- **Fare** — the passenger's own fare only, e.g. `৳70 (shared, you save ৳30)`, with a **🔒 Fare locked** label once the ride has `STARTED`.
+- **Cancel** — the button appears only while the passenger may cancel (`REQUESTED` or `MATCHED`; see the cancellation table above).
+
+The page **polls `GET /passenger/rides/:id` every 5 seconds** (plain polling, no websockets), so the passenger sees someone joining or leaving, the driver arriving and fare changes without reloading. Polling stops for good once the ride is `COMPLETED` or `CANCELLED`, and pauses while the browser tab is hidden. There is no live GPS tracking.
+
+**What the API will and will not tell a passenger**
+
+| | Shown | Never shown |
+|---|---|---|
+| Driver | name, photo URL, Tesla ID | — |
+| Driver phone | only while the ride is in progress (`MATCHED`, `DRIVER_ARRIVED`, `STARTED`) | while it is still `REQUESTED`; after the ride is completed or cancelled |
+| Other passengers | first name | phone number, fare, destination, surname, ids |
+| Fare | the passenger's own | anyone else's |
+
 ## Passenger Data Isolation
 
-A passenger can never view or modify another passenger's ride. The `findOwnedRide` helper in `routes/passenger.ts` performs an ownership check, and deliberately returns a generic **404** (not 403) for rides belonging to other passengers. This prevents an attacker from confirming whether a given ride ID even exists.
+A passenger can only reach their own rides. Every `/passenger/rides` route (active, history, one ride, cancel) requires a login and acts as the **logged-in passenger**: the caller is identified by their token, never by an id they send. A `passengerId` that is not the caller's, or a ride that belongs to someone else, gets **403**; a ride that does not exist gets **404**; no login gets **401**; a driver's login is refused (403). The routes were tightened together with the ride status details above, because a forgeable id would now expose a driver's phone number and co-passengers' names.
