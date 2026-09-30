@@ -2,13 +2,13 @@
  * Pool fares — the QUOTE model (before and while a ride runs). Final fares, settled from the pool's
  * checkpoints when a journey ends, are covered in segmentFares.test.ts.
  *
- *   fare = ৳100 base fare + distanceCharge × share rate, rounded to the nearest ৳5
- *   distanceCharge = distanceKm × ৳20 × seats        share rate: 1 passenger 100% · 2 → 70% · 3 → 55%
- *   the driver earns the SUM of what the passengers pay
+ *   tripCost = ৳100 + distanceKm × ৳20 × seats            (what the route costs alone)
+ *   1 on board: fare = tripCost        n ≥ 2 on board: fare = tripCost / n + ৳20 driver bonus
+ *   rounded to the nearest whole taka (halves up); the driver earns the SUM of what the passengers pay
  *
  * The story cast is the seed data: Jashim (driver, "Bullet", 3 seats) and passengers Nusrat, Rafiq
- * and Shirin, all wanting Mohakhali → Badda. That route is 4 km: distance charge ৳80, so
- *   ৳180 alone · 100 + 80 × 70% = 156 → ৳155 with 2 · 100 + 80 × 55% = 144 → ৳145 with 3.
+ * and Shirin, all wanting Mohakhali → Badda. That route is 4 km: tripCost 100 + 80 = ৳180, so
+ *   ৳180 alone · 180 / 2 + 20 = ৳110 with 2 · 180 / 3 + 20 = 60 + 20 = ৳80 with 3.
  */
 import request from 'supertest';
 import { app } from '../index';
@@ -20,8 +20,6 @@ import {
   calculateFareForPassenger,
   estimateFare,
   pooledFare,
-  roundToNearest5,
-  shareRatePercent,
 } from '../utils/fareCalculator';
 import { recalculatePoolFares } from '../utils/poolFares';
 
@@ -36,100 +34,82 @@ afterAll(async () => {
 
 // ───────────────────────────── pure fare math ─────────────────────────────
 describe('fare math', () => {
-  describe('share rate', () => {
-    it('is 100% alone, 70% with two passengers, 55% with three', () => {
-      expect(shareRatePercent(1)).toBe(100);
-      expect(shareRatePercent(2)).toBe(70);
-      expect(shareRatePercent(3)).toBe(55);
-    });
-
-    it('keeps the 3-passenger rate for a bigger pool, and never goes above 100%', () => {
-      expect(shareRatePercent(4)).toBe(55);
-      expect(shareRatePercent(7)).toBe(55);
-      expect(shareRatePercent(0)).toBe(100);
-    });
-
-    it('is always 100% for a private ride, whatever the pool size', () => {
-      for (const size of [1, 2, 3, 4]) expect(shareRatePercent(size, false)).toBe(100);
-    });
-  });
-
-  describe('the story: a 5 km route (Mirpur → Mohammadpur): distance charge ৳100', () => {
+  describe('the story: a 5 km route (Mirpur → Mohammadpur): tripCost 100 + 100 = ৳200', () => {
     it('1 passenger pays ৳200 and the driver earns ৳200', () => {
       expect(pooledFare('Mirpur', 'Mohammadpur', 1, 1)).toBe(200);
     });
 
-    it('2 passengers pay 100 + 70 = ৳170 each and the driver earns ৳340', () => {
+    it('2 passengers pay 200 / 2 + 20 = ৳120 each and the driver earns ৳240', () => {
       const fare = pooledFare('Mirpur', 'Mohammadpur', 1, 2);
-      expect(fare).toBe(170);
-      expect(fare * 2).toBe(340);
+      expect(fare).toBe(120);
+      expect(fare * 2).toBe(240);
     });
 
-    it('3 passengers pay 100 + 55 = ৳155 each and the driver earns ৳465', () => {
+    it('3 passengers pay 200 / 3 + 20 = 66.67 + 20 → ৳87 each and the driver earns ৳261', () => {
       const fare = pooledFare('Mirpur', 'Mohammadpur', 1, 3);
-      expect(fare).toBe(155);
-      expect(fare * 3).toBe(465);
+      expect(fare).toBe(87);
+      expect(fare * 3).toBe(261);
     });
   });
 
-  describe('base fare and rounding to the nearest ৳5', () => {
-    it('Mohakhali → Badda (4 km, 1 seat) has a solo fare of ৳180', () => {
+  describe('trip cost and rounding to the nearest whole taka', () => {
+    it('Mohakhali → Badda (4 km, 1 seat) has a trip cost of ৳180', () => {
       expect(calculateBaseFare('Mohakhali', 'Badda', 1)).toBe(180);
     });
 
     it.each([
-      // route, km, alone, with 2 (70% of the distance charge), with 3 (55%)
-      ['Mohakhali', 'Badda', 4, 180, 155, 145], // 156 → 155, 144 → 145
-      ['Mohakhali', 'Gulshan', 3, 160, 140, 135], // 142 → 140, 133 → 135
-      ['Mohakhali', 'Banani', 2, 140, 130, 120], // 128 → 130, 122 → 120
-      ['Gulshan', 'Gulshan 1', 1, 120, 115, 110], // 114 → 115, 111 → 110
-      ['Mirpur', 'Mohammadpur', 5, 200, 170, 155], // exact
+      // route, km, alone (tripCost), with 2 (tripCost / 2 + 20), with 3 (tripCost / 3 + 20, rounded)
+      ['Mohakhali', 'Badda', 4, 180, 110, 80], // 90 + 20 · 60 + 20
+      ['Mohakhali', 'Gulshan', 3, 160, 100, 73], // 80 + 20 · 53.33 → 53, + 20
+      ['Mohakhali', 'Banani', 2, 140, 90, 67], // 70 + 20 · 46.67 → 47, + 20
+      ['Gulshan', 'Gulshan 1', 1, 120, 80, 60], // 60 + 20 · 40 + 20
+      ['Mirpur', 'Mohammadpur', 5, 200, 120, 87], // 100 + 20 · 66.67 → 67, + 20
+      ['Gulshan', 'Dhanmondi', 10, 300, 170, 120], // 150 + 20 · 100 + 20
     ])('%s → %s (%i km): alone ৳%i · with 2 ৳%i · with 3 ৳%i', (from, to, _km, alone, two, three) => {
       expect(pooledFare(from, to, 1, 1)).toBe(alone);
       expect(pooledFare(from, to, 1, 2)).toBe(two);
       expect(pooledFare(from, to, 1, 3)).toBe(three);
     });
 
-    it('rounds halves up (17.5 → 20)', () => {
-      expect(roundToNearest5(17.5)).toBe(20);
-      expect(roundToNearest5(12.4)).toBe(10);
+    it('more seats cost more: 2 seats Mohakhali → Badda is 100 + 4 × 20 × 2 = ৳260, and 260 / 2 + 20 = ৳150 with 2 on board', () => {
+      expect(calculateBaseFare('Mohakhali', 'Badda', 2)).toBe(260);
+      expect(pooledFare('Mohakhali', 'Badda', 2, 1)).toBe(260);
+      expect(pooledFare('Mohakhali', 'Badda', 2, 2)).toBe(150);
     });
 
-    it('always returns whole taka in multiples of ৳5, never above the solo fare, and falls as more join', () => {
+    it('always returns whole taka, never above the trip cost, and falls as more join', () => {
       const routes: [string, string][] = [['Gulshan', 'Gulshan 1'], ['Mohakhali', 'Badda'], ['Uttara', 'Motijheel'], ['Mirpur', 'Dhanmondi']];
       for (const [from, to] of routes) {
         for (const seats of [1, 2, 3]) {
           const solo = calculateBaseFare(from, to, seats);
-          const fares = [1, 2, 3].map((n) => pooledFare(from, to, seats, n));
+          const fares = [1, 2, 3, 4].map((n) => pooledFare(from, to, seats, n));
           fares.forEach((f) => {
             expect(Number.isInteger(f)).toBe(true);
-            expect(f % 5).toBe(0);
             expect(f).toBeLessThanOrEqual(solo);
           });
           expect(fares[0]).toBe(solo);
-          expect(fares[1]!).toBeLessThanOrEqual(fares[0]!);
-          expect(fares[2]!).toBeLessThanOrEqual(fares[1]!);
+          for (let i = 1; i < fares.length; i++) expect(fares[i]!).toBeLessThanOrEqual(fares[i - 1]!);
         }
       }
     });
 
-    it('the ৳100 base fare is never discounted: even a huge pool only discounts the distance part', () => {
-      expect(pooledFare('Mohakhali', 'Badda', 1, 3)).toBeGreaterThanOrEqual(100);
-      expect(pooledFare('Mohakhali', 'Badda', 1, 50)).toBe(pooledFare('Mohakhali', 'Badda', 1, 3)); // 3+ share one rate
+    it('a bigger pool keeps splitting: 4 on board pay 180 / 4 + 20 = ৳65 each', () => {
+      expect(pooledFare('Mohakhali', 'Badda', 1, 4)).toBe(65);
+      expect(pooledFare('Mohakhali', 'Badda', 1, 50)).toBe(24); // 180 / 50 = 3.6 → 4, + 20
     });
   });
 
   describe('each passenger pays for their OWN route', () => {
     it('two passengers with different destinations get different fares', () => {
-      // Nusrat Mohakhali → Badda (4 km, charge ৳80): 100 + 56 = 156 → 155.  Rafiq Mohakhali → Gulshan (3 km, ৳60): 100 + 42 = 142 → 140.
+      // Nusrat Mohakhali → Badda (tripCost 180): 90 + 20 = 110.  Rafiq Mohakhali → Gulshan (tripCost 160): 80 + 20 = 100.
       const nusrat = calculateFareForPassenger('Mohakhali', 'Badda', 1, 2);
       const rafiq = calculateFareForPassenger('Mohakhali', 'Gulshan', 1, 2);
-      expect(nusrat).toBe(155);
-      expect(rafiq).toBe(140);
-      expect(nusrat + rafiq).toBe(295); // what the driver earns
+      expect(nusrat).toBe(110);
+      expect(rafiq).toBe(100);
+      expect(nusrat + rafiq).toBe(210); // what the driver earns
     });
 
-    it('a private ride always costs its full solo fare', () => {
+    it('a private ride always costs its full trip cost', () => {
       expect(calculateFareForPassenger('Mohakhali', 'Badda', 1, 3, false)).toBe(180);
     });
   });
@@ -139,10 +119,10 @@ describe('fare math', () => {
       expect(estimateFare('Mohakhali', 'Badda', 1, true)).toEqual({
         baseFare: 180,
         fare: 180,
-        poolFare: 155,
+        poolFare: 110,
         tiers: [
-          { passengers: 2, ratePercent: 70, fare: 155 },
-          { passengers: 3, ratePercent: 55, fare: 145 },
+          { passengers: 2, fare: 110 },
+          { passengers: 3, fare: 80 },
         ],
       });
     });
@@ -209,30 +189,30 @@ describe('Pool fare split — Nusrat, Rafiq, Shirin and Jashim (Bullet)', () => 
 
       expect(await fareOf(nusratRide)).toBe(180);
       const mine = (await passengerActive(nusrat)).body.rides[0];
-      expect(mine).toMatchObject({ baseFare: 180, estimatedFare: 180, poolDiscount: 0, poolSize: 1, shareRatePercent: 100, fareFinal: false });
+      expect(mine).toMatchObject({ baseFare: 180, estimatedFare: 180, poolDiscount: 0, poolSize: 1, fareFinal: false });
       expect((await driverActive()).body).toMatchObject({ poolSize: 1, totalEarnings: 180 });
     });
 
-    it('2 passengers: Nusrat and Rafiq each pay 100 + 56 = ৳155; the driver earns ৳310', async () => {
+    it('2 passengers: Nusrat and Rafiq each pay 180 / 2 + 20 = ৳110; the driver earns ৳220', async () => {
       const nusratRide = await joinPool(nusrat);
       const rafiqRide = await joinPool(rafiq);
 
-      expect(await fareOf(nusratRide)).toBe(155); // Nusrat's fare was re-estimated when Rafiq joined
-      expect(await fareOf(rafiqRide)).toBe(155);
+      expect(await fareOf(nusratRide)).toBe(110); // Nusrat's fare was re-estimated when Rafiq joined
+      expect(await fareOf(rafiqRide)).toBe(110);
       const mine = (await passengerActive(nusrat)).body.rides[0];
-      expect(mine).toMatchObject({ baseFare: 180, estimatedFare: 155, poolDiscount: 25, poolSize: 2, shareRatePercent: 70, isSharedRide: true });
-      expect((await driverActive()).body).toMatchObject({ poolSize: 2, totalEarnings: 310 });
+      expect(mine).toMatchObject({ baseFare: 180, estimatedFare: 110, poolDiscount: 70, poolSize: 2, isSharedRide: true });
+      expect((await driverActive()).body).toMatchObject({ poolSize: 2, totalEarnings: 220 });
     });
 
-    it('3 passengers: Nusrat, Rafiq and Shirin each pay 100 + 44 = ৳145; the driver earns ৳435', async () => {
+    it('3 passengers: Nusrat, Rafiq and Shirin each pay 180 / 3 + 20 = ৳80; the driver earns ৳240', async () => {
       const nusratRide = await joinPool(nusrat);
       const rafiqRide = await joinPool(rafiq);
       const shirinRide = await joinPool(shirin);
 
-      for (const id of [nusratRide, rafiqRide, shirinRide]) expect(await fareOf(id)).toBe(145);
+      for (const id of [nusratRide, rafiqRide, shirinRide]) expect(await fareOf(id)).toBe(80);
       const mine = (await passengerActive(shirin)).body.rides[0];
-      expect(mine).toMatchObject({ baseFare: 180, estimatedFare: 145, poolDiscount: 35, poolSize: 3, shareRatePercent: 55, coPassengers: 2 });
-      expect((await driverActive()).body).toMatchObject({ poolSize: 3, totalEarnings: 435, vehicle: { modelName: 'Bullet', occupiedSeats: 3 } });
+      expect(mine).toMatchObject({ baseFare: 180, estimatedFare: 80, poolDiscount: 100, poolSize: 3, coPassengers: 2 });
+      expect((await driverActive()).body).toMatchObject({ poolSize: 3, totalEarnings: 240, vehicle: { modelName: 'Bullet', occupiedSeats: 3 } });
     });
 
     it('a passenger only ever sees their own fare, never a co-passenger\'s', async () => {
@@ -247,24 +227,24 @@ describe('Pool fare split — Nusrat, Rafiq, Shirin and Jashim (Bullet)', () => 
   });
 
   describe('recalculation when a passenger leaves before the trip', () => {
-    it('Shirin cancels → Nusrat and Rafiq go from ৳145 back up to ৳155; the driver earns ৳310', async () => {
+    it('Shirin cancels → Nusrat and Rafiq go from ৳80 back up to ৳110; the driver earns ৳220', async () => {
       const nusratRide = await joinPool(nusrat);
       const rafiqRide = await joinPool(rafiq);
       const shirinRide = await joinPool(shirin);
-      expect(await fareOf(nusratRide)).toBe(145);
+      expect(await fareOf(nusratRide)).toBe(80);
 
       expect((await passengerCancel(shirinRide, shirin)).status).toBe(200);
 
-      expect(await fareOf(nusratRide)).toBe(155);
-      expect(await fareOf(rafiqRide)).toBe(155);
-      expect(await fareOf(shirinRide)).toBe(145); // the cancelled ride is not re-priced
-      expect((await driverActive()).body).toMatchObject({ poolSize: 2, totalEarnings: 310 });
+      expect(await fareOf(nusratRide)).toBe(110);
+      expect(await fareOf(rafiqRide)).toBe(110);
+      expect(await fareOf(shirinRide)).toBe(80); // the cancelled ride is not re-priced
+      expect((await driverActive()).body).toMatchObject({ poolSize: 2, totalEarnings: 220 });
     });
 
     it('a second passenger cancels → the last one is back to the full ৳180', async () => {
       const nusratRide = await joinPool(nusrat);
       const rafiqRide = await joinPool(rafiq);
-      expect(await fareOf(nusratRide)).toBe(155);
+      expect(await fareOf(nusratRide)).toBe(110);
 
       await passengerCancel(rafiqRide, rafiq);
 
@@ -278,8 +258,8 @@ describe('Pool fare split — Nusrat, Rafiq, Shirin and Jashim (Bullet)', () => 
       const shirinRide = await joinPool(shirin);
 
       expect((await driverAction(shirinRide, 'cancel')).status).toBe(200);
-      expect(await fareOf(nusratRide)).toBe(155);
-      expect(await fareOf(rafiqRide)).toBe(155);
+      expect(await fareOf(nusratRide)).toBe(110);
+      expect(await fareOf(rafiqRide)).toBe(110);
 
       expect((await driverAction(rafiqRide, 'cancel')).status).toBe(200);
       expect(await fareOf(nusratRide)).toBe(180);
@@ -292,7 +272,7 @@ describe('Pool fare split — Nusrat, Rafiq, Shirin and Jashim (Bullet)', () => 
       expect(await fareOf(nusratRide)).toBe(180);
 
       await joinPool(shirin);
-      expect(await fareOf(nusratRide)).toBe(155);
+      expect(await fareOf(nusratRide)).toBe(110);
     });
   });
 
@@ -302,17 +282,17 @@ describe('Pool fare split — Nusrat, Rafiq, Shirin and Jashim (Bullet)', () => 
       const rafiqRide = await joinPool(rafiq);
       await driverAction(nusratRide, 'arrive');
       await driverAction(rafiqRide, 'arrive');
-      expect(await fareOf(nusratRide)).toBe(155); // both matched: quoted for a pool of 2
+      expect(await fareOf(nusratRide)).toBe(110); // both matched: quoted for a pool of 2
 
       // Nusrat boards first and is alone in the car: her estimate is the solo fare...
       expect((await driverAction(nusratRide, 'start')).status).toBe(200);
       expect(await fareOf(nusratRide)).toBe(180);
       // ...and Rafiq boarding makes it 2 on board, so the estimate falls again: nothing was locked.
       expect((await driverAction(rafiqRide, 'start')).status).toBe(200);
-      expect(await fareOf(nusratRide)).toBe(155);
-      expect(await fareOf(rafiqRide)).toBe(155);
+      expect(await fareOf(nusratRide)).toBe(110);
+      expect(await fareOf(rafiqRide)).toBe(110);
       const mine = (await passengerActive(nusrat)).body.rides[0];
-      expect(mine).toMatchObject({ status: 'STARTED', estimatedFare: 155, fareFinal: false });
+      expect(mine).toMatchObject({ status: 'STARTED', estimatedFare: 110, fareFinal: false });
     });
 
     it('someone who joins after the trip has started: the started passenger is not repriced until they board', async () => {
@@ -323,13 +303,13 @@ describe('Pool fare split — Nusrat, Rafiq, Shirin and Jashim (Bullet)', () => 
       const late = await requestRide(rafiq);
       const res = await accept(late.body.rideRequest.id);
       expect(res.status).toBe(200);
-      // Rafiq is matched (pool of 2 → quoted 155) but not on board; Nusrat is still alone in the car.
+      // Rafiq is matched (pool of 2 → quoted 110) but not on board; Nusrat is still alone in the car.
       expect(await fareOf(nusratRide)).toBe(180);
-      expect(await fareOf(late.body.rideRequest.id)).toBe(155);
+      expect(await fareOf(late.body.rideRequest.id)).toBe(110);
 
       await driverAction(late.body.rideRequest.id, 'arrive');
       await driverAction(late.body.rideRequest.id, 'start');
-      expect(await fareOf(nusratRide)).toBe(155);
+      expect(await fareOf(nusratRide)).toBe(110);
     });
 
     it('a direct recalculation does not disturb a fare that is already final', async () => {
@@ -354,26 +334,26 @@ describe('Pool fare split — Nusrat, Rafiq, Shirin and Jashim (Bullet)', () => 
       await driverAction(rafiqRide, 'complete');
       await driverAction(nusratRide, 'complete');
 
-      // Both were on board together for the whole 4 km: 100 + 80 × 70% = 156 → ৳155 each
-      expect(await fareOf(nusratRide)).toBe(155);
-      expect(await fareOf(rafiqRide)).toBe(155);
+      // Both were on board together for the whole 4 km: 180 / 2 + 20 = ৳110 each
+      expect(await fareOf(nusratRide)).toBe(110);
+      expect(await fareOf(rafiqRide)).toBe(110);
       const history = await request(app).get(`/driver/rides/history?driverId=${jashim.id}`);
-      expect(history.body.rides.map((r: any) => r.estimatedFare)).toEqual([155, 155]);
+      expect(history.body.rides.map((r: any) => r.estimatedFare)).toEqual([110, 110]);
     });
   });
 
   describe('private rides', () => {
-    it('always pay 100%, and nobody can be pooled with them', async () => {
+    it('always pay the full trip cost, and nobody can be pooled with them', async () => {
       const privateRide = await joinPool(nusrat, { ...MOHAKHALI_TO_BADDA, allowSharing: false });
       expect(await fareOf(privateRide)).toBe(180);
 
       const other = await requestRide(rafiq);
       expect((await accept(other.body.rideRequest.id)).status).toBe(409);
       expect(await fareOf(privateRide)).toBe(180);
-      expect((await passengerActive(nusrat)).body.rides[0]).toMatchObject({ allowSharing: false, estimatedFare: 180, poolDiscount: 0, shareRatePercent: 100 });
+      expect((await passengerActive(nusrat)).body.rides[0]).toMatchObject({ allowSharing: false, estimatedFare: 180, poolDiscount: 0 });
     });
 
-    it('stay at 100% even if a pool is somehow larger (recalculation ignores the pool for them)', async () => {
+    it('stay at the full trip cost even if a pool is somehow larger (recalculation ignores the pool for them)', async () => {
       const privateRide = await RideRequest.create({
         passengerId: nusrat.id, driverId: jashim.id, vehicleId: bullet.id, pickupZone: 'Mohakhali', destinationZone: 'Badda',
         seatCount: 1, allowSharing: false, baseFare: 180, estimatedFare: 180, poolDiscount: 0, status: 'MATCHED',
@@ -384,7 +364,7 @@ describe('Pool fare split — Nusrat, Rafiq, Shirin and Jashim (Bullet)', () => 
       });
       await recalculatePoolFares(bullet.id);
       expect((await privateRide.reload()).estimatedFare).toBe(180);
-      expect((await sharedRide.reload()).estimatedFare).toBe(155);
+      expect((await sharedRide.reload()).estimatedFare).toBe(110);
     });
   });
 
@@ -405,25 +385,25 @@ describe('Pool fare split — Nusrat, Rafiq, Shirin and Jashim (Bullet)', () => 
 
     it('different destinations → different fares, and the driver earns their sum', async () => {
       const [a, b] = await seatPool([
-        { passenger: nusrat, to: 'Badda', base: 180 }, // 4 km: 100 + 56 = 156 → 155
-        { passenger: rafiq, to: 'Gulshan', base: 160 }, // 3 km: 100 + 42 = 142 → 140
+        { passenger: nusrat, to: 'Badda', base: 180 }, // 4 km, tripCost 180: 90 + 20 = 110
+        { passenger: rafiq, to: 'Gulshan', base: 160 }, // 3 km, tripCost 160: 80 + 20 = 100
       ]);
-      expect([a!.estimatedFare, b!.estimatedFare]).toEqual([155, 140]);
-      expect([a!.poolDiscount, b!.poolDiscount]).toEqual([25, 20]);
-      expect((await driverActive()).body.totalEarnings).toBe(295);
+      expect([a!.estimatedFare, b!.estimatedFare]).toEqual([110, 100]);
+      expect([a!.poolDiscount, b!.poolDiscount]).toEqual([70, 60]);
+      expect((await driverActive()).body.totalEarnings).toBe(210);
     });
 
-    it('with three passengers on different routes: 55% of each own distance charge', async () => {
+    it('with three passengers on different routes: each own trip cost / 3, plus ৳20', async () => {
       const rides = await seatPool([
-        { passenger: nusrat, to: 'Badda', base: 180 }, // 100 + 44 = 144 → 145
-        { passenger: rafiq, to: 'Gulshan', base: 160 }, // 100 + 33 = 133 → 135
-        { passenger: shirin, to: 'Banani', base: 140 }, // 100 + 22 = 122 → 120
+        { passenger: nusrat, to: 'Badda', base: 180 }, // 180 / 3 + 20 = 60 + 20 = 80
+        { passenger: rafiq, to: 'Gulshan', base: 160 }, // 160 / 3 = 53.33 → 53, + 20 = 73
+        { passenger: shirin, to: 'Banani', base: 140 }, // 140 / 3 = 46.67 → 47, + 20 = 67
       ]);
-      expect(rides.map((r) => r.estimatedFare)).toEqual([145, 135, 120]);
-      expect((await driverActive()).body.totalEarnings).toBe(400);
+      expect(rides.map((r) => r.estimatedFare)).toEqual([80, 73, 67]);
+      expect((await driverActive()).body.totalEarnings).toBe(220);
     });
 
-    it('the literal story: a 5 km route pays ৳200 → ৳170 each → ৳155 each, driver ৳200 → ৳340 → ৳465', async () => {
+    it('the literal story: a 5 km route pays ৳200 → ৳120 each → ৳87 each, driver ৳200 → ৳240 → ৳261', async () => {
       const total = async () => (await RideRequest.sum('estimatedFare', { where: { vehicleId: bullet.id } })) ?? 0;
       const make = (passenger: any) =>
         RideRequest.create({
@@ -437,22 +417,21 @@ describe('Pool fare split — Nusrat, Rafiq, Shirin and Jashim (Bullet)', () => 
 
       const r2 = await make(rafiq);
       await recalculatePoolFares(bullet.id);
-      expect([(await r1.reload()).estimatedFare, (await r2.reload()).estimatedFare, await total()]).toEqual([170, 170, 340]);
+      expect([(await r1.reload()).estimatedFare, (await r2.reload()).estimatedFare, await total()]).toEqual([120, 120, 240]);
 
       const r3 = await make(shirin);
       await recalculatePoolFares(bullet.id);
-      expect([(await r1.reload()).estimatedFare, (await r2.reload()).estimatedFare, (await r3.reload()).estimatedFare, await total()]).toEqual([155, 155, 155, 465]);
+      expect([(await r1.reload()).estimatedFare, (await r2.reload()).estimatedFare, (await r3.reload()).estimatedFare, await total()]).toEqual([87, 87, 87, 261]);
     });
   });
 
   describe('stored money is whole taka', () => {
-    it('fares, base fares and savings are integers in multiples of ৳5 at every pool size', async () => {
+    it('fares, base fares and savings are whole-taka integers at every pool size', async () => {
       const ids = [await joinPool(nusrat), await joinPool(rafiq), await joinPool(shirin)];
       for (const id of ids) {
         const r = (await RideRequest.findByPk(id))!;
         for (const value of [r.baseFare, r.estimatedFare, r.poolDiscount]) {
           expect(Number.isInteger(value)).toBe(true);
-          expect(value % 5).toBe(0);
         }
       }
     });
@@ -493,11 +472,11 @@ describe('migrating stored fares from paisa to whole taka', () => {
     // Past ride: converted and rounded (15000 paisa = ৳150; discount ৳30)
     await finished.reload();
     expect([finished.baseFare, finished.estimatedFare, finished.poolDiscount]).toEqual([180, 150, 30]);
-    // Open pool of two: re-priced with the current model (100 + 80 × 70% = 156 → ৳155, saving ৳25)
+    // Open pool of two: re-priced with the current model (180 / 2 + 20 = ৳110, saving ৳70)
     await open1.reload();
     await open2.reload();
-    expect([open1.baseFare, open1.estimatedFare, open1.poolDiscount]).toEqual([180, 155, 25]);
-    expect([open2.baseFare, open2.estimatedFare, open2.poolDiscount]).toEqual([180, 155, 25]);
+    expect([open1.baseFare, open1.estimatedFare, open1.poolDiscount]).toEqual([180, 110, 70]);
+    expect([open2.baseFare, open2.estimatedFare, open2.poolDiscount]).toEqual([180, 110, 70]);
     expect(await version()).toBe(FARES_IN_TAKA_VERSION);
 
     // Second start: nothing is converted again

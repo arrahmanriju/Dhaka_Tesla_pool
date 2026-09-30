@@ -4,7 +4,6 @@ import { sequelize, User, RideRequest, Vehicle, DriverProfile, RideEvent, Wallet
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 import { validateTransition, RideStatus, DHAKA_ZONES } from '../models/RideRequest';
 import { isFareFinal, recalculatePoolFares } from '../utils/poolFares';
-import { shareRatePercent } from '../utils/fareCalculator';
 import { priceJourney, recordExit } from '../utils/checkpoints';
 import { settleJourney } from '../utils/journeySettlement';
 import { collectPayment } from '../utils/payments';
@@ -236,7 +235,6 @@ async function enrichRide(ride: any, timeline: any[] = []) {
     pool,
     coPassengers,
     poolSize,
-    shareRatePercent: shareRatePercent(poolSize, ride.allowSharing),
     poolDiscountApplied: ride.poolDiscount > 0,
     isSharedRide: coPassengers > 0,
     canCancel: PASSENGER_CANCELLABLE.includes(ride.status as RideStatus),
@@ -476,19 +474,16 @@ async function paymentOf(rideId: string, passengerId: string) {
 // The passenger's own fare breakdown, stretch by stretch. Zone names are left out on purpose: the
 // checkpoints between a passenger's boarding and exit are where OTHER passengers boarded or got
 // off, which a passenger must not learn. What is shown is only how far, how many were on board,
-// the share rate and the charge for each stretch.
+// the driver bonus and the charge for each stretch.
 // ---------------------------------------------------------------------------
 function passengerBill(bill: any | null, fare: number, previousEstimate: number | null) {
   return {
-    baseCharge: bill?.baseCharge ?? 100,
     segments: (bill?.segments ?? []).map((s: any) => ({
       distanceKm: s.distanceKm,
-      distanceCharge: s.distanceCharge,
       passengers: s.passengers,
-      ratePercent: s.ratePercent,
+      driverBonus: s.driverBonus,
       charge: s.charge,
     })),
-    distanceTotal: bill?.distanceTotal ?? null,
     soloFare: bill?.soloFare ?? null,
     poolDiscount: bill?.poolDiscount ?? null,
     fare,
@@ -508,7 +503,7 @@ function passengerBill(bill: any | null, fare: number, previousEstimate: number 
 //   • The fare is settled by the same checkpoint / segment pricing as every other journey: the
 //     cancellation zone becomes a checkpoint (passenger count − 1) and their journey is priced from
 //     where they boarded up to it (settleJourney → segmentFare in utils/fareCalculator.ts). They pay
-//     only for the segments they actually travelled, each at the share rate for who was on board.
+//     only for the segments they actually travelled, each split between the passengers on board (plus the driver bonus).
 //     `estimatedFare` becomes that final charge.
 //   • The seat is released at once, so the vehicle is eligible again for the pending-request
 //     filter without a re-match.
@@ -517,7 +512,7 @@ function passengerBill(bill: any | null, fare: number, previousEstimate: number 
 // ASSUMPTION — nobody else's fare is settled or rewritten by this. A passenger still on board is not
 // charged extra or refunded because someone left: each journey is priced only from the segments that
 // passenger travelled. Passengers still on board simply continue with one fewer passenger, so their
-// own NEXT segments are priced at the lower share rate (their running estimate is refreshed), while
+// own NEXT segments are split between more passengers (their running estimate is refreshed), while
 // the segments already travelled keep the rate that applied when they were travelled.
 // ---------------------------------------------------------------------------
 router.patch('/rides/:id/cancel-in-transit', ownPassenger, async (req: AuthenticatedRequest, res: Response) => {

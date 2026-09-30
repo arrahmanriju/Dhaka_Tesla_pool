@@ -74,9 +74,8 @@ describe('Ride Request API and Logic', () => {
 
   describe('Fares', () => {
     it('stores the full solo fare at creation; the pool discount only applies once someone joins', async () => {
-      // Solo fare: 100 + distanceKm * 20 * seats (whole taka). When 2+ passengers share the car, the ৳100
-      // base fare is still charged in full and only the distance charge is discounted: 70% of it with 2
-      // on board, 55% with 3, rounded to the nearest ৳5 (see segmentFares.test.ts for the full model).
+      // Solo fare (the trip cost): 100 + distanceKm * 20 * seats (whole taka). When 2+ passengers share the car,
+      // each pays the trip cost / riders + ৳20 driver bonus, to the nearest taka (see pricingModel.test.ts).
       // Gulshan -> Banani is 2 km.
       // Solo, 1 seat: 100 + 2 * 20 * 1 = ৳140.
       const p1 = (await User.create({ name: 'Nusrat', email: 'nusrat@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
@@ -91,7 +90,7 @@ describe('Ride Request API and Logic', () => {
   });
 
   describe('Fares once a second passenger is matched', () => {
-    it('quotes both the shared rate: 100 + 40 × 70% = 128 → ৳130 each (the ৳100 base is not discounted)', async () => {
+    it('quotes both the shared fare: 140 / 2 + 20 = ৳90 each', async () => {
       const driver = (await User.create({ name: 'D', email: 'dq@test.com', password: 'pwd', role: 'DRIVER' })).toJSON() as any;
       await Vehicle.create({ driverId: driver.id, modelName: 'Car', seatCapacity: 4, licensePlate: 'CAR-Q1' });
       const a = (await User.create({ name: 'A', email: 'aq@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
@@ -103,7 +102,7 @@ describe('Ride Request API and Logic', () => {
 
       for (const id of [ra, rb]) {
         const r = (await request(app).get(`/passenger/rides/${id === ra ? ra : rb}`).set(asUser(id === ra ? a.id : b.id))).body.ride;
-        expect(r).toMatchObject({ baseFare: 140, estimatedFare: 130, poolDiscount: 10, fareFinal: false });
+        expect(r).toMatchObject({ baseFare: 140, estimatedFare: 90, poolDiscount: 50, fareFinal: false });
       }
     });
   });

@@ -243,12 +243,11 @@ export function RideStatusCard({
       {ride.fareBreakdown && ride.fareBreakdown.segments.some((s) => s.distanceKm > 0) && (
         <section className="ride-block" id="ride-fare-breakdown" aria-label={t('rs.bill.title')}>
           <h3 className="ride-block__title">{t('rs.bill.title')}</h3>
-          <div className="ride-block__line">{t('rs.bill.base')}: ৳{ride.fareBreakdown.baseCharge}</div>
           {ride.fareBreakdown.segments
             .filter((s) => s.distanceKm > 0)
             .map((s, i) => (
               <div key={i} className="ride-block__line">
-                {t('rs.bill.segment', { km: s.distanceKm, n: s.passengers, distance: s.distanceCharge, rate: s.ratePercent })} = ৳{s.charge}
+                {t(s.driverBonus > 0 ? 'rs.bill.segmentShared' : 'rs.bill.segmentAlone', { km: s.distanceKm, n: s.passengers, bonus: s.driverBonus })} = ৳{s.charge}
               </div>
             ))}
           <div className="ride-block__line"><strong>{t('rs.bill.total')}: ৳{ride.estimatedFare}</strong></div>

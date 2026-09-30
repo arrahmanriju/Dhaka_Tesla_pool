@@ -15,14 +15,14 @@ export const isFareFinal = (status: string): boolean => status === 'COMPLETED' |
  * Re-estimates every open passenger's fare on a vehicle after the pool changed.
  *
  *   not started yet (MATCHED / DRIVER_ARRIVED)
- *       ৳100 + distance charge × share rate for the number of rides on the vehicle, to their destination
- *       (pooledFare); poolDiscount = own solo fare − that.
+ *       trip cost / rides on the vehicle + ৳20 driver bonus, to their destination (pooledFare);
+ *       poolDiscount = own solo fare − that (never below 0).
  *   STARTED (on board)
  *       what they would pay if they got off at their destination now, walking the pool's checkpoints:
  *       the stretches already travelled are priced with the passengers who were actually on board,
  *       and the rest of the way with whoever is on board now (priceJourney).
  *
- * Private rides always pay 100%. Finished rides (see isFareFinal) are never touched: their fare is
+ * Private rides always pay the full trip cost. Finished rides (see isFareFinal) are never touched: their fare is
  * settled by settleJourney() at the moment their own journey ends.
  *
  * Call inside the transaction that changed the pool.

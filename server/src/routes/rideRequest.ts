@@ -9,7 +9,7 @@ import {
   POOL_JOINABLE_STATUSES,
   TERMINAL_STATUSES,
 } from '../models/RideRequest';
-import { calculateBaseFare, estimateFare, shareRatePercent } from '../utils/fareCalculator';
+import { calculateBaseFare, estimateFare } from '../utils/fareCalculator';
 import { isFareFinal, recalculatePoolFares } from '../utils/poolFares';
 import { checkPoolJoin, loadPool, PoolVerdict } from '../utils/pooling';
 import { recordRideEvent } from '../utils/rideEvents';
@@ -410,7 +410,7 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
 
       // ── STEP 4: Recalculate pool fares ──────────────────────────────────
       // Now that this ride is MATCHED (vehicleId is set), the pool has grown. Everyone who has not
-      // started is re-estimated (100 + distance charge x share rate for the pool); rides that are on
+      // started is re-estimated (trip cost / riders + the driver bonus, for the pool); rides that are on
       // board are re-estimated from the pool's checkpoints. Only finished rides are settled and final.
       await recalculatePoolFares(vehicle.id, t);
 
@@ -473,7 +473,7 @@ router.post('/:id/decline', authenticateToken, async (req: AuthenticatedRequest,
 // ---------------------------------------------------------------------------
 // GET /ride-requests/:id/pool-info
 // Returns the pool summary for a matched ride: co-passengers count (no PII),
-// and how much of their own fare each passenger pays (the share rate).
+// and whether they are saving anything by sharing.
 // ---------------------------------------------------------------------------
 router.get('/:id/pool-info', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -488,7 +488,7 @@ router.get('/:id/pool-info', authenticateToken, async (req: AuthenticatedRequest
 
     if (!ride.vehicleId) {
       // Not yet matched — no pool info
-      return res.json({ poolSize: 1, coPassengers: 0, shareRatePercent: 100, poolDiscountApplied: false });
+      return res.json({ poolSize: 1, coPassengers: 0, poolDiscountApplied: false });
     }
 
     const poolRides: any[] = await RideRequest.findAll({
@@ -503,7 +503,6 @@ router.get('/:id/pool-info', authenticateToken, async (req: AuthenticatedRequest
     res.json({
       poolSize,
       coPassengers: poolSize - 1,
-      shareRatePercent: shareRatePercent(poolSize, ride.allowSharing),
       poolDiscountApplied: ride.poolDiscount > 0,
     });
   } catch (error) {

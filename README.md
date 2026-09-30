@@ -79,14 +79,14 @@ A ride that is `STARTED` keeps taking passengers, as long as their route is comp
 4. The new passenger becomes `MATCHED` and has their **own** lifecycle: `DRIVER_ARRIVED` → `STARTED` (this is when they board) → `COMPLETED`, independent of Nusrat. When someone completes, their seat is freed and the next compatible request can take it.
 5. Shirin later requests the same way but to a different destination: the same direction (the check runs against every ride on the vehicle), so she is offered too if a seat is left.
 
-**Fares mid-trip** are priced by segments, see *Fare Model*: each passenger pays full price for the stretches they ride alone and the discounted price for the stretches when others are on board, so a passenger who boards mid-trip only pays the shared rate from where they boarded.
+**Fares mid-trip** are priced by segments, see *Fare Model*: each passenger pays the full cost of the stretches they ride alone, and an even share of the cost plus a flat ৳20 driver bonus for the stretches when others are on board, so a passenger who boards mid-trip only pays the shared price from where they boarded.
 
 **Lifecycle history.** Every status change writes a permanent `RideEvents` row in the same transaction (who acted, the new status, the pool size, and `ridersOnboard`: how many passengers were already `STARTED` on the vehicle, not counting this one). A `MATCHED` event with `ridersOnboard > 0` is a mid-trip join. Drivers read it at `GET /driver/rides/timeline` (first names only, oldest first); each passenger's own ride (`GET /passenger/rides/:id`, `/active`, `/history`) carries only their own `timeline` and `joinedMidTrip`.
 
 **Privacy.** Joining mid-trip reveals nothing extra: a passenger's responses contain only their own fare, route and history, plus the other passengers' **first names**. They never contain another passenger's fare, route, phone or id. `GET /ride-requests/me` and `/ride-requests/:id/pool-info` now require the passenger's login, like the `/passenger` routes.
 
 ### Fare Model — checkpoint-based segment pricing
-Passengers who share a Tesla pay less **for the stretches they actually share**, and the driver earns more in total. Fares are **whole taka (integers, never paisa), rounded to the nearest ৳5**. There is no fare lock at `STARTED` any more: a passenger's fare is **settled when their own journey ends**.
+Passengers who share a Tesla split the cost of the stretches they actually share, and the driver earns more in total. Fares are **whole taka (integers, never paisa)**, with an exact rounding rule (below). There is no fare lock at `STARTED` any more: a passenger's fare is **settled when their own journey ends**.
 
 **Checkpoints.** A `PoolCheckpoint` (zone, timestamp, active-passenger count) is written whenever the number of passengers on a vehicle changes during a trip:
 
@@ -99,14 +99,40 @@ Passengers who share a Tesla pay less **for the stretches they actually share**,
 
 The last row is not in the original list of events, but a drop-off changes who is on board exactly like a cancellation does, so the next stretch has to be priced with one fewer passenger. The count is the number of rides on the vehicle that are `STARTED`. `runId` groups one continuous run of a vehicle: it begins when someone boards an empty vehicle and ends when the count returns to 0; a later trip is a new run and is never mixed in.
 
-**The formula.** When a passenger's own journey ends (`COMPLETED` or `CANCELLED_IN_TRANSIT`), walk the checkpoints from where **they** boarded to where **they** got off. Each consecutive pair is a segment `zoneA → zoneB`, with `n` = the count at its first checkpoint:
+**The formula.** When a passenger's own journey ends (`COMPLETED` or `CANCELLED_IN_TRANSIT`), walk the checkpoints from where **they** boarded to where **they** got off. Each consecutive pair is a segment `zoneA → zoneB`, with `n` = the count at its first checkpoint (how many are on board, this passenger included).
 
-- `distanceCharge = distanceKm(zoneA → zoneB) × ৳20 × seats`
-- `charge = distanceCharge × shareRate(n)`, with `shareRate`: **1 passenger 100%**, **2 → 70%**, **3 or more → 55%** (so the discount only applies when `n > 1`; a private ride is always 100%)
-- **`fare = ৳100 base fare (once) + Σ charge`**, rounded to the nearest ৳5 (halves up)
-- `poolDiscount = (৳100 + Σ distanceCharge, rounded) − fare`: what pooling saved on the stretches they travelled
+- **`tripCost`** of a route = `৳100 + distanceKm × ৳20 × seats`: what the passenger pays riding alone (Gulshan → Dhanmondi, 10 km, 1 seat: 100 + 200 = **৳300**). When the journey is cut into segments, that cost is spread over the journey **by distance**: a segment of `segKm` km gets `segKm / journeyKm` of it (`journeyKm` is the sum of the segment distances), so the pieces always add up to the whole.
+- **`n = 1`** (alone on the segment): `segmentFare = tripCost of the segment`, unchanged.
+- **`n ≥ 2`**: `segmentFare = tripCost of the segment / n + ৳20`. The cost is split evenly, **then** a flat ৳20 driver bonus is added per passenger, the same for everybody sharing that segment (per passenger, not per seat; a 0 km hop earns none).
+- **`fare = Σ segmentFare`** over the segments they were on board for.
+- `poolDiscount = soloFare − fare` (never below 0), where `soloFare` is the whole journey's tripCost: what pooling saved on the stretches they travelled.
+- A private ride (sharing off) is always priced as `n = 1`.
 
-The ৳100 base fare is charged once and is **never discounted**. Two checkpoints in the same zone are 0 km apart and cost nothing. Distances come from the zone table in `fareCalculator.ts`, so hopping via a zone costs the sum of the hops (see the assumptions below).
+**Rounding rule.** Money is whole taka, and `tripCost / n` is rarely a whole number (280 / 3 = 93.33). The fare is rounded to the **nearest whole taka, halves up**, applied to the **running total** rather than to each piece: a segment's charge is `round(total to the end of this segment) − round(total to its start)`. So every segment charge is a whole number of taka, the charges add up **exactly** to the fare, and the fare is the exact total rounded once (317.5 → ৳318, never ৳317). Rounding each segment separately could drift by a taka per segment and a passenger who rode alone would no longer pay exactly their trip cost. The ৳20 bonus is a whole number, so only the split part is ever rounded, and the code uses only integer arithmetic (a common denominator, never a floating-point fraction). By hand: add up the exact segment amounts, then round the total half up.
+
+**Worked example — Gulshan → Dhanmondi (10 km, tripCost ৳300).** The same route with different numbers of riders on board the whole way:
+
+| Riders on board | Calculation | Each pays | The driver earns |
+|---|---|---|---|
+| 1 (solo) | tripCost | **৳300** | ৳300 |
+| 2 | 300 / 2 + 20 = 150 + 20 | **৳170** | ৳340 |
+| 3 | 300 / 3 + 20 = 100 + 20 | **৳120** | ৳360 |
+| 4 | 300 / 4 + 20 = 75 + 20 | **৳95** | ৳380 |
+
+**A fourth passenger for only part of the route.** Three riders go Gulshan → Dhanmondi and the pool changes at **Mohakhali** (Gulshan–Mohakhali 3 km, Mohakhali–Dhanmondi 8 km). The zone table is not additive (3 + 8 = 11 km, against 10 km direct), so a rider who goes the whole way, now with a checkpoint at Mohakhali in their journey, is priced over 11 km: tripCost = 100 + 11 × 20 = **৳320**, and a 3 km segment gets 3/11 of it, an 8 km segment 8/11.
+
+| | Segment | Exact amount | Charge |
+|---|---|---|---|
+| **Fourth boards at Mohakhali.** Each of the 3 full-route riders | Gulshan → Mohakhali, 3 on board | 3/11 × 320 = 87.27; / 3 = 29.09; + 20 = 49.09 | 49 |
+| | Mohakhali → Dhanmondi, 4 on board | 8/11 × 320 = 232.73; / 4 = 58.18; + 20 = 78.18 | 78 |
+| | **fare** = 127.27 → | | **৳127** |
+| The fourth (8 km only, tripCost 100 + 160 = 260) | Mohakhali → Dhanmondi, 4 on board | 260 / 4 + 20 = 65 + 20 | **৳85** |
+| **Fourth rides from Gulshan and leaves at Mohakhali.** Each of the 3 others | Gulshan → Mohakhali, 4 on board | 87.27 / 4 = 21.82; + 20 = 41.82 | 42 |
+| | Mohakhali → Dhanmondi, 3 on board | 232.73 / 3 = 77.58; + 20 = 97.58 | 97 |
+| | **fare** = 139.39 → | | **৳139** |
+| The fourth (3 km only, tripCost 100 + 60 = 160) | Gulshan → Mohakhali, 4 on board | 160 / 4 + 20 = 40 + 20 | **৳60** |
+
+The partial-route rider pays much less than a full-route rider (85 and 60, against 127 and 139), and the full-route riders pay differently from the plain 3-rider fare of ৳120, because the checkpoint at Mohakhali cuts their journey into two segments, each carrying the ৳20 bonus. The driver earns 3 × 127 + 85 = ৳466 in the first case and 3 × 139 + 60 = ৳477 in the second. (These are checked in `pricingModel.test.ts`.)
 
 **Worked example — solo for one hop, then pooled for the next.** Zone distances: Uttara–Mirpur **9 km**, Mirpur–Dhanmondi **7 km**. Nusrat rides Uttara → Dhanmondi and starts alone; Rafiq is accepted mid-trip and boards at Mirpur, going to Dhanmondi; both are dropped at Dhanmondi (Nusrat first).
 
@@ -117,35 +143,36 @@ The ৳100 base fare is charged once and is **never discounted**. Two checkpoint
 | Nusrat is dropped | Dhanmondi | 1 |
 | Rafiq is dropped | Dhanmondi | 0 |
 
-| | Segment | Distance charge | On board | Charge |
-|---|---|---|---|---|
-| **Nusrat** | Uttara → Mirpur | 9 × 20 = ৳180 | 1 → 100% | **৳180** |
-| | Mirpur → Dhanmondi | 7 × 20 = ৳140 | 2 → 70% | **৳98** |
-| | **fare** = 100 + 180 + 98 = 378 → **৳380** | (alone all the way: 100 + 320 = ৳420) | | pooling saved ৳40 |
-| **Rafiq** | Mirpur → Dhanmondi | 7 × 20 = ৳140 | 2 → 70% | **৳98** |
-| | **fare** = 100 + 98 = 198 → **৳200** | (alone: 100 + 140 = ৳240) | | pooling saved ৳40 |
+| | Segment | Exact amount | Charge |
+|---|---|---|---|
+| **Nusrat** (journeyKm 9 + 7 = 16, tripCost 100 + 320 = ৳420) | Uttara → Mirpur, alone | 9/16 × 420 = 236.25 | **৳236** |
+| | Mirpur → Dhanmondi, 2 on board | 7/16 × 420 = 183.75; / 2 = 91.875; + 20 = 111.875 | **৳112** |
+| | **fare** = 348.125 → **৳348** | (alone all the way: ৳420) | pooling saved ৳72 |
+| **Rafiq** (journeyKm 7, tripCost 100 + 140 = ৳240) | Mirpur → Dhanmondi, 2 on board | 240 / 2 + 20 | **৳140** |
+| | **fare** = **৳140** | (alone: ৳240) | pooling saved ৳100 |
 
-The driver earns ৳380 + ৳200 = **৳580**. Before Rafiq boards, Nusrat's running fare is the solo ৳420; once he boards it drops to ৳380.
+The driver earns ৳348 + ৳140 = **৳488**. Before Rafiq boards, Nusrat's running fare is the solo ৳420; once he boards it drops to ৳348.
 
-**A passenger who was pooled from the start** pays the discount for the whole trip: if Nusrat and Rafiq both board at Mohakhali for Badda (4 km, ৳80 distance charge), each pays 100 + 80 × 70% = 156 → **৳155** (three on board: 100 + 44 = 144 → **৳145**). A 0 km stretch (the moment between two people boarding in the same zone) costs nothing.
+**A passenger who was pooled from the start** pays the shared price for the whole trip: if Nusrat and Rafiq both board at Mohakhali for Badda (4 km, tripCost 100 + 80 = ৳180), each pays 180 / 2 + 20 = **৳110** (three on board: 180 / 3 + 20 = **৳80**). A 0 km stretch (the moment between two people boarding in the same zone) costs nothing.
 
-**Leaving mid-trip is just another checkpoint.** If Nusrat asks to be dropped at Mohammadpur (Mirpur–Mohammadpur 5 km) after Rafiq boarded: her segments are Uttara → Mirpur ৳180 alone + Mirpur → Mohammadpur ৳100 × 70% = ৳70, so she pays 100 + 180 + 70 = **৳350**, not the ৳380 she was on track for. Rafiq, who rides on to Dhanmondi, then pays for Mirpur → Mohammadpur (৳70, shared) and Mohammadpur → Dhanmondi (3 km, ৳60, now alone): 100 + 70 + 60 = **৳230**.
+**Leaving mid-trip is just another checkpoint.** If Nusrat asks to be dropped at Mohammadpur (Mirpur–Mohammadpur 5 km) after Rafiq boarded: her journey is 9 + 5 = 14 km, tripCost 100 + 280 = ৳380. Uttara → Mirpur alone is 9/14 × 380 = 244.29; Mirpur → Mohammadpur with 2 on board is 5/14 × 380 = 135.71, / 2 = 67.86, + 20 = 87.86. She pays 332.14 → **৳332**, not the ৳348 she was on track for. Rafiq, who rides on to Dhanmondi (journey 5 + 3 = 8 km, tripCost 100 + 160 = ৳260), pays Mirpur → Mohammadpur shared, 5/8 × 260 = 162.5, / 2 = 81.25, + 20 = 101.25, and Mohammadpur → Dhanmondi (3 km) alone, 3/8 × 260 = 97.5: 198.75 → **৳199**.
 
 **What the fare is before the journey ends.** `estimatedFare` is an estimate, and `fareFinal` (in the API) is `false` until the passenger's own journey ends:
-- *Not on board yet* (`MATCHED`, `DRIVER_ARRIVED`): what they would pay if the pool now on the vehicle stayed together for the whole route, `100 + distanceCharge × shareRate(pool size)`. The **Request Ride** page shows the price alone and with 2 and 3 passengers (`GET /ride-requests/estimate` returns `baseFare`, `fare`, `poolFare` and `tiers`).
+- *Not on board yet* (`MATCHED`, `DRIVER_ARRIVED`): what they would pay if the pool now on the vehicle stayed together for the whole route, `tripCost / pool size + ৳20`. The **Request Ride** page shows the price alone and with 2 and 3 passengers (`GET /ride-requests/estimate` returns `baseFare`, `fare`, `poolFare` and `tiers`).
 - *On board* (`STARTED`): the checkpoint walk so far, plus the rest of the way to their destination with whoever is on board now. It is refreshed whenever someone boards or gets off.
 - *Ended*: the final, settled fare. Nothing that happens afterwards changes it (`recalculatePoolFares` never touches a finished ride).
 
 **Rules and assumptions**
 - Each passenger is priced from **their own** pickup, exit and boarding time; pooled passengers can pay different amounts. The driver earns the **sum of what their passengers pay**.
-- **Stated assumptions.** (1) A hop through an intermediate zone is priced with the zone table, which is not geometric, so it can differ from the direct distance (Mirpur–Mohammadpur 5 km + Mohammadpur–Dhanmondi 3 km = 8 km, against Mirpur–Dhanmondi 7 km). (2) Rounding is done once, on the total, so a segment's `charge` is exact and only the fare is rounded. (3) A ride that started before checkpoints existed has no boarding checkpoint and simply keeps the fare it already had.
+- **Stated assumptions.** (1) A hop through an intermediate zone is priced with the zone table, which is not geometric, so it can differ from the direct distance (Mirpur–Mohammadpur 5 km + Mohammadpur–Dhanmondi 3 km = 8 km, against Mirpur–Dhanmondi 7 km). (2) Rounding is done on the running total (see the rounding rule), so the segment charges add up exactly to the fare. (3) A ride that started before checkpoints existed has no boarding checkpoint and simply keeps the fare it already had.
 - `baseFare` stays the passenger's own **solo fare for the whole route** (`100 + distanceKm × 20 × seats`), set at request time; `poolDiscount` is what pooling saved (`baseFare − estimate` before the journey ends, `soloFare − fare` on the stretches travelled after it).
-- **Private rides (sharing off) always pay 100%** and are never pooled.
+- The ৳20 bonus is charged on **every shared segment that covers distance**, so a journey cut into several shared segments pays it several times, and a very short shared segment can cost slightly more than riding it alone (`poolDiscount` is then 0, never negative). The ৳100 base is no longer a separate, never-discounted charge: it is part of `tripCost`, so it is split and spread with the rest.
+- **Private rides (sharing off) always pay the full trip cost** and are never pooled.
 
 **What each side sees**
-- **Passenger** — only their own fare, e.g. `৳155 (shared, you save ৳25)`. While on board it is marked *≈ estimate*; once their journey ends it shows *✓ Final fare*, with **how it was worked out** (`fareBreakdown`: the ৳100 base and each stretch's km, passengers on board, rate and charge). The breakdown deliberately leaves out **zone names**: the checkpoints between a passenger's boarding and exit are where *other* passengers boarded or got off.
+- **Passenger** — only their own fare, e.g. `৳110 (shared, you save ৳70)`. While on board it is marked *≈ estimate*; once their journey ends it shows *✓ Final fare*, with **how it was worked out** (`fareBreakdown`: each stretch's km, passengers on board, driver bonus and charge). The breakdown deliberately leaves out **zone names**: the checkpoints between a passenger's boarding and exit are where *other* passengers boarded or got off.
 - **Driver** — the **total earnings for the ride** on the Active tab (`GET /driver/rides/active` returns `poolSize` and `totalEarnings`, a running estimate) and each passenger's settled fare, cancellation zone and pre-exit estimate in the pool history.
-- API money fields (`baseFare`, `estimatedFare`, `poolDiscount`, `fare`, `totalEarnings`) are whole taka; rides carry `fareFinal`, and a passenger's own ride also carries `poolSize`, `shareRatePercent` and `fareBreakdown`.
+- API money fields (`baseFare`, `estimatedFare`, `poolDiscount`, `fare`, `totalEarnings`) are whole taka; rides carry `fareFinal`, and a passenger's own ride also carries `poolSize` and `fareBreakdown`.
 
 #### Worked Example — the seed data
 `npm run seed` creates Jashim (driver, **Bullet**, 3 seats) and Nusrat, Rafiq and Shirin, who each request **Mohakhali → Badda** (4 km: solo ৳180). Log in as Jashim, go online and accept them one by one (before the trip starts everyone is quoted as if the pool stays together):
@@ -153,9 +180,9 @@ The driver earns ৳380 + ৳200 = **৳580**. Before Rafiq boards, Nusrat's run
 | Jashim accepts | Each passenger pays (quote) | Jashim earns |
 |---|---|---|
 | Nusrat | ৳180 | ৳180 |
-| + Rafiq | 100 + 56 = ৳155 each (saves ৳25) | ৳310 |
-| + Shirin | 100 + 44 = ৳145 each (saves ৳35) | ৳435 |
-| Shirin cancels | back to ৳155 each | ৳310 |
+| + Rafiq | 180 / 2 + 20 = ৳110 each (saves ৳70) | ৳220 |
+| + Shirin | 180 / 3 + 20 = ৳80 each (saves ৳100) | ৳240 |
+| Shirin cancels | back to ৳110 each | ৳220 |
 | Nusrat's trip starts (alone in the car) | Nusrat's running fare is ৳180 until Rafiq boards | — |
 
 #### Upgrading an existing database
@@ -229,9 +256,9 @@ Passengers may cancel their ride only while it is in one of these states:
 A passenger whose ride is `STARTED` can get off part-way with `PATCH /passenger/rides/:id/cancel-in-transit` and `{ "cancellationZone": "Mohammadpur" }`. The ride ends as **`CANCELLED_IN_TRANSIT`**, a terminal status separate from `CANCELLED`: they were picked up and travelled part of the route, so it stays in their history and the driver's as a real part-trip with a fare, unlike a request that never happened.
 
 - **Cancellation zone (required)** — the nearest predefined zone where they are dropped off, from the same zone list as everywhere else. It cannot be the pickup zone, or the destination zone (at the destination the driver completes the trip). A missing or unknown zone is a 400 and nothing changes.
-- **Fare — not a special formula.** The cancellation zone is recorded as a **checkpoint** (`PASSENGER_LEFT`, passengers on board − 1) and the journey is priced by the same segment walk as any other: `fare = ৳100 + Σ segment charges` from where they boarded to the cancellation zone (see *Fare Model*). They pay only for the segments they actually travelled, each at the rate for who was on board. `estimatedFare` becomes that final charge and `poolDiscount` what pooling saved on those stretches.
-- **Worked example** — Nusrat rides **Uttara → Dhanmondi**, Rafiq boards at Mirpur. Nusrat is dropped at **Mohammadpur**: Uttara → Mirpur 9 km × 20 = ৳180 alone; Mirpur → Mohammadpur 5 km × 20 = ৳100 × 70% = ৳70 with Rafiq on board. **Fare = 100 + 180 + 70 = ৳350** (she was on track for ৳380 to Dhanmondi). Riding alone the same exit at Mirpur costs 100 + 180 = **৳280**. If she leaves at the zone where Rafiq boards (Mirpur), the shared stretch is 0 km and costs nothing: ৳280.
-- **Nobody else is charged or refunded** — a stated assumption, also in the code: each passenger is priced only from the segments *they* travelled. Passengers still on board simply carry on with one fewer passenger, so their **later** stretches are priced at the lower share rate (their running estimate is refreshed), while stretches already travelled keep the rate that applied when they were travelled. Rafiq above ends at 100 + 70 + 60 = **৳230**.
+- **Fare — not a special formula.** The cancellation zone is recorded as a **checkpoint** (`PASSENGER_LEFT`, passengers on board − 1) and the journey is priced by the same segment walk as any other: `fare = Σ segment charges` from where they boarded to the cancellation zone (see *Fare Model*). They pay only for the segments they actually travelled, each split between the passengers who were on board (plus the ৳20 driver bonus when shared). `estimatedFare` becomes that final charge and `poolDiscount` what pooling saved on those stretches.
+- **Worked example** — Nusrat rides **Uttara → Dhanmondi**, Rafiq boards at Mirpur. Nusrat is dropped at **Mohammadpur**: her journey is 9 + 5 = 14 km, tripCost 100 + 280 = ৳380; Uttara → Mirpur alone is 9/14 × 380 = 244.29; Mirpur → Mohammadpur with Rafiq on board is 5/14 × 380 / 2 + 20 = 87.86. **Fare = 332.14 → ৳332** (she was on track for ৳348 to Dhanmondi). Riding alone the same exit at Mirpur costs 100 + 180 = **৳280**. If she leaves at the zone where Rafiq boards (Mirpur), the shared stretch is 0 km and costs nothing: ৳280.
+- **Nobody else is charged or refunded** — a stated assumption, also in the code: each passenger is priced only from the segments *they* travelled. Passengers still on board simply carry on with one fewer passenger, so their **later** stretches are split between one fewer rider (their running estimate is refreshed), while stretches already travelled keep the split that applied when they were travelled. Rafiq above ends at 101.25 + 97.5 = 198.75 → **৳199**.
 - **The seat is released at once**, in the same transaction, so `GET /ride-requests/pending` shows the free seat straight away and the request passes the same route filter as before, with no re-match. (The vehicle's position for that filter is taken from the riders still on board, see Rule B.)
 - **Audit trail** — a `RideEvents` row (permanent) records `CANCELLED_IN_TRANSIT`, the actor (the passenger), the time, `cancellationZone`, `chargedFare` and `fullTripEstimate` (what they were on track to pay to their original destination), and the `PoolCheckpoints` row records the zone and new head count. `GET /driver/rides/timeline` shows it beside the other passengers' unchanged events; each passenger's own `timeline`/history carries only their own. The other passengers never see who left, where, or what they paid.
 - **Who and when** — only the ride's owner (404 no such ride, 403 someone else's, 401 not logged in, a driver's login is refused). Only a `STARTED` ride: `COMPLETED`, an earlier status or an already-cancelled ride gets 409. The check and the update are one conditional step inside an immediate transaction, and the driver's *complete* is conditional the same way, so completing and leaving at the same moment cannot both succeed, record two exits or release the seat twice.
@@ -251,10 +278,10 @@ There is **no real gateway**. Each ride has a payment method and, for wallet rid
 | `CASH_DUE` | Cash ride: `paymentAmount` is what the passenger owes the driver. **The wallet is never touched.** |
 | `FAILED` | Wallet ride, but the balance was lower than the fare. **Nothing was debited**, the balance is unchanged, and the ride still ends normally |
 
-- **Worked example** — Nusrat (wallet ৳1000) and Rafiq (cash ৳500 wallet, unused) share the Uttara → Dhanmondi trip from the fare example: Nusrat's final fare is **৳380**, so her balance becomes 1000 − 380 = **৳620** (`PAID`, `paymentAmount` 380); Rafiq's is **৳200**, recorded as `CASH_DUE` and his wallet stays ৳500. If Nusrat had left at Mohammadpur instead, she would be debited **৳350**.
+- **Worked example** — Nusrat (wallet ৳1000) and Rafiq (cash ৳500 wallet, unused) share the Uttara → Dhanmondi trip from the fare example: Nusrat's final fare is **৳348**, so her balance becomes 1000 − 348 = **৳652** (`PAID`, `paymentAmount` 348); Rafiq's is **৳140**, recorded as `CASH_DUE` and his wallet stays ৳500. If Nusrat had left at Mohammadpur instead, she would be debited **৳332**.
 - **Insufficient balance — what happens next (MVP).** The debit is one atomic conditional update (`walletBalance` is reduced only where it is at least the fare), so it can never overdraw, even with simultaneous debits. If it does not apply, the payment is marked `FAILED`, no ledger row is written, and the fare is **flagged for cash settlement**: the ride stays `COMPLETED` / `CANCELLED_IN_TRANSIT` (the passenger did travel), `paymentAmount` records what is due, the passenger's card says *Wallet payment failed: pay ৳X in cash to the driver*, and the driver's card says *Wallet payment failed: collect ৳X in cash*. There is no retry, top-up or debt account in this MVP; a real system would retry after a top-up or record a debt. An exact balance pays and leaves ৳0; one taka short fails.
 - **Who sees what** — a passenger reads only their **own** balance and ledger at `GET /passenger/wallet` (the caller comes from the login token; someone else's `passengerId` is a 403, no login a 401, a driver's login a 403) and their own ride's `paymentMethod`, `paymentStatus`, `paymentAmount`. **Drivers never see a wallet balance**: their responses carry a ride's `paymentMethod` and `paymentStatus` (paid / cash to collect / failed) and the amount owed, nothing else.
-- **Seed** — `npm run seed` gives Nusrat ৳1000 (pays by wallet), Rafiq ৳500 (pays cash) and Shirin **৳120** (wallet; small on purpose, so a ৳145 fare fails and shows the cash-settlement path).
+- **Seed** — `npm run seed` gives Nusrat ৳1000 (pays by wallet), Rafiq ৳500 (pays cash) and Shirin **৳120** (wallet; small on purpose: a solo ৳180 fare fails and shows the cash-settlement path, while a shared ৳80 or ৳110 fare is within her balance).
 - **Existing databases** — `Users.walletBalance` (default 0) and `RideRequests.paymentMethod / paymentStatus / paymentAmount` (cash, `NOT_DUE`) are added by an idempotent startup migration, which now runs before the paisa → taka migration reads rides; `WalletTransactions` is created by `sync()`.
 
 ## Ride Status Page (Passenger)
@@ -265,7 +292,7 @@ The passenger's **Active Rides** tab is the ride status page. Once a driver acce
 - **Pool** — `Shared ride · 1 other passenger` or `Just you`, seats taken (`2 of 3 seats taken`), and the other passengers by **first name only**.
 - **Progress** — a step tracker, Matched → Driver Arrived → Started → Completed, with the current step highlighted; a waiting message while the ride is still `REQUESTED`; and a clear notice when it is `CANCELLED`.
 - **Payment** — how the ride is paid and its status (*Pay ৳X in cash*, *Paid ৳X from your wallet*, *Wallet payment failed*), for their own ride only.
-- **Fare** — the passenger's own fare only, e.g. `৳155 (shared, you save ৳25)`, marked *≈ estimate* while on board and *✓ Final fare* once their journey has ended, with the breakdown of how it was worked out.
+- **Fare** — the passenger's own fare only, e.g. `৳110 (shared, you save ৳70)`, marked *≈ estimate* while on board and *✓ Final fare* once their journey has ended, with the breakdown of how it was worked out.
 - **Cancel** — the button appears only while the passenger may cancel (`REQUESTED` or `MATCHED`; see the cancellation table above).
 - **Leave ride here** — once the ride is `STARTED` the ordinary cancel is gone, but the passenger can pick the zone where they are dropped off and leave part-way (see *Leaving a ride mid-trip*).
 

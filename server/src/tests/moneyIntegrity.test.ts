@@ -8,7 +8,7 @@ import { app } from '../index';
 import { sequelize, User, Vehicle, RideRequest, RideEvent, WalletTransaction } from '../models';
 import { DHAKA_ZONES } from '../models/RideRequest';
 import { collectPayment } from '../utils/payments';
-import { percentOf, pooledFare, roundToNearest5, segmentDistanceKm, segmentFare } from '../utils/fareCalculator';
+import { FarePoint, pooledFare, segmentDistanceKm, segmentFare } from '../utils/fareCalculator';
 import { asUser } from './helpers';
 
 beforeAll(async () => {
@@ -20,20 +20,22 @@ afterAll(async () => {
 
 describe('money is integer taka', () => {
   describe('the arithmetic', () => {
-    it('roundToNearest5 matches exact integer rounding (halves up) for every whole-taka amount', () => {
-      for (let t = 0; t <= 5000; t++) {
-        const r = t % 5;
-        const expected = r >= 3 ? t + (5 - r) : t - r; // 2.5 never occurs for whole taka: 3+ rounds up, 2 or less down
-        expect(roundToNearest5(t)).toBe(expected);
+    it('a single shared segment is exactly tripCost / n rounded half up, plus the ৳20 bonus (checked with integer maths)', () => {
+      for (const a of DHAKA_ZONES) {
+        for (const b of DHAKA_ZONES) {
+          const km = segmentDistanceKm(a, b);
+          expect(Number.isInteger(km)).toBe(true);
+          for (const seats of [1, 2, 3]) {
+            const tripCost = 100 + 20 * seats * km;
+            for (const n of [1, 2, 3, 4, 5]) {
+              const fare = segmentFare({ points: [{ zone: a, passengerCount: n }], exitZone: b, seatCount: seats }).fare;
+              // round(tripCost / n) half up = floor((2 × tripCost + n) / (2n)): no fraction ever appears
+              const expected = n === 1 || km === 0 ? tripCost : Math.floor((2 * tripCost + n) / (2 * n)) + 20;
+              expect(fare).toBe(expected);
+            }
+          }
+        }
       }
-    });
-
-    it('percentOf is exact or throws: it never truncates a fraction', () => {
-      expect(percentOf(180, 70)).toBe(126);
-      expect(percentOf(100, 55)).toBe(55);
-      expect(() => percentOf(15, 70)).toThrow(/whole number of taka/); // 10.5
-      expect(() => percentOf(1.5, 100)).toThrow();
-      expect(() => percentOf(Number.MAX_SAFE_INTEGER, 100)).toThrow();
     });
 
     it('every fare, every segment charge and every discount is an integer, for all zone pairs, seats and pool sizes', () => {
@@ -44,11 +46,11 @@ describe('money is integer taka', () => {
             for (const n of [1, 2, 3, 4]) {
               for (const allowSharing of [true, false]) {
                 const fare = pooledFare(from, to, seats, n, allowSharing);
-                expect(Number.isInteger(fare) && fare % 5 === 0).toBe(true);
+                expect(Number.isInteger(fare)).toBe(true);
                 const bill = segmentFare({ points: [{ zone: from, passengerCount: n }], exitZone: to, seatCount: seats, allowSharing });
                 for (const s of bill.segments) {
                   expect(Number.isInteger(s.charge)).toBe(true);
-                  expect(Number.isInteger(s.distanceCharge)).toBe(true);
+                  expect(Number.isInteger(s.driverBonus)).toBe(true);
                 }
                 expect(Number.isInteger(bill.poolDiscount) && bill.poolDiscount >= 0).toBe(true);
                 expect(Number.isInteger(bill.soloFare)).toBe(true);
@@ -59,17 +61,65 @@ describe('money is integer taka', () => {
       }
     });
 
-    it('a segment is exactly its distance charge times its rate, with nothing lost to rounding', () => {
-      for (const a of DHAKA_ZONES) {
-        for (const b of DHAKA_ZONES) {
-          const km = segmentDistanceKm(a, b);
-          expect(Number.isInteger(km)).toBe(true);
-          for (const n of [1, 2, 3]) {
-            const s = segmentFare({ points: [{ zone: a, passengerCount: n }], exitZone: b, seatCount: 3 }).segments[0]!;
-            expect(s.charge * 100).toBe(s.distanceCharge * s.ratePercent); // exact, no remainder dropped
+    // The fare of a multi-segment journey, computed a second way: with exact BigInt fractions, then
+    // rounded once (half up). It must equal segmentFare's running-total rounding, and the segment
+    // charges must add up to it exactly.
+    const exactFare = (points: FarePoint[], exitZone: string, seats: number): bigint => {
+      const legs = points.map((p, i) => ({ km: segmentDistanceKm(p.zone, points[i + 1]?.zone ?? exitZone), n: p.passengerCount }));
+      const journeyKm = legs.reduce((sum, l) => sum + l.km, 0);
+      const solo = 100 + 20 * seats * journeyKm;
+      // numerator over the denominator journeyKm × 60 (60 = lcm of every count used below, 1..5)
+      const den = BigInt(journeyKm * 60);
+      let num = 0n;
+      for (const l of legs) {
+        num += BigInt(l.km * solo * (60 / l.n)) + (l.n >= 2 && l.km > 0 ? BigInt(20) * den : 0n);
+      }
+      return (2n * num + den) / (2n * den); // round half up
+    };
+
+    it('a journey with several segments: charges are integers, add up to the fare, and the fare is the exact total rounded once', () => {
+      const zones = ['Uttara', 'Mirpur', 'Dhanmondi', 'Mohakhali', 'Badda', 'Gulshan', 'Banani'];
+      let checked = 0;
+      for (let i = 0; i < zones.length; i++) {
+        for (let j = 0; j < zones.length; j++) {
+          for (let k = 0; k < zones.length; k++) {
+            if (i === j || j === k) continue;
+            for (const counts of [[1, 2], [2, 3], [3, 1], [2, 2], [1, 4], [4, 3], [5, 2]] as const) {
+              const points: FarePoint[] = [{ zone: zones[i]!, passengerCount: counts[0] }, { zone: zones[j]!, passengerCount: counts[1] }];
+              for (const seats of [1, 2]) {
+                const bill = segmentFare({ points, exitZone: zones[k]!, seatCount: seats });
+                expect(bill.segments.every((s) => Number.isInteger(s.charge))).toBe(true);
+                expect(bill.segments.reduce((sum, s) => sum + s.charge, 0)).toBe(bill.fare);
+                expect(BigInt(bill.fare)).toBe(exactFare(points, zones[k]!, seats));
+                checked++;
+              }
+            }
           }
         }
       }
+      expect(checked).toBeGreaterThan(1000);
+    });
+
+    it('a passenger who rides alone pays exactly the trip cost, however many segments the journey has', () => {
+      const bill = segmentFare({
+        points: [{ zone: 'Uttara', passengerCount: 1 }, { zone: 'Mirpur', passengerCount: 1 }, { zone: 'Mohakhali', passengerCount: 1 }],
+        exitZone: 'Badda',
+        seatCount: 1,
+      });
+      // journeyKm 9 + 7 + 4 = 20, tripCost 500: the pieces 225 + 175 + 100 add up exactly
+      expect(bill.fare).toBe(500);
+      expect(bill.segments.map((s) => s.charge)).toEqual([225, 175, 100]);
+    });
+
+    it('a tie rounds up: an exact total of 317.5 is ৳318, never ৳317', () => {
+      // journeyKm 16, tripCost 420: 9 km alone = 236.25, then 7 km with 3 on board = 183.75 / 3 + 20 = 81.25
+      const bill = segmentFare({
+        points: [{ zone: 'Uttara', passengerCount: 1 }, { zone: 'Mirpur', passengerCount: 3 }],
+        exitZone: 'Dhanmondi',
+        seatCount: 1,
+      });
+      expect(bill.fare).toBe(318);
+      expect(bill.segments.map((s) => s.charge)).toEqual([236, 82]);
     });
 
     it('a wallet debit refuses a fractional, negative or unsafe amount instead of truncating it', async () => {

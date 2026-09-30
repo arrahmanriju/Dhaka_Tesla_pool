@@ -5,25 +5,26 @@
  * pure maths).
  *
  * Worked example (Jashim's Bullet, 3 seats). Zone distances: Uttara–Mirpur 9 km, Mirpur–Dhanmondi
- * 7 km, Mirpur–Mohammadpur 5 km, Mohammadpur–Dhanmondi 3 km. Distance charge = km × ৳20.
+ * 7 km, Mirpur–Mohammadpur 5 km, Mohammadpur–Dhanmondi 3 km. tripCost = 100 + 20 × journeyKm, spread over
+ * the journey by distance; a shared segment costs its share / riders + ৳20 driver bonus (see fareCalculator.ts).
  *
  *   Nusrat rides Uttara → Dhanmondi and starts alone.   checkpoint (Uttara, 1)
  *   Rafiq boards at Mirpur, going to Dhanmondi.          checkpoint (Mirpur, 2)
  *   Nusrat asks to be dropped at Mohammadpur.            checkpoint (Mohammadpur, 1)
  *
- *   Nusrat:  Uttara → Mirpur        9 km  ৳180  alone (100%)          = ৳180
- *            Mirpur → Mohammadpur   5 km  ৳100  2 on board (70%)      = ৳70
- *            fare = 100 + 180 + 70 = ৳350        (on track for ৳380 to Dhanmondi before she left)
- *   Rafiq, dropped at Dhanmondi:
- *            Mirpur → Mohammadpur   5 km  ৳100  2 on board (70%)      = ৳70
- *            Mohammadpur → Dhanmondi 3 km ৳60   alone again (100%)    = ৳60
- *            fare = 100 + 70 + 60 = ৳230
+ *   Nusrat:  journeyKm 9 + 5 = 14, tripCost 100 + 280 = ৳380
+ *            Uttara → Mirpur        9/14 × 380 = 244.29   alone
+ *            Mirpur → Mohammadpur   5/14 × 380 = 135.71, / 2 = 67.86, + 20 = 87.86
+ *            exact total 332.14 → ৳332        (on track for ৳348 to Dhanmondi before she left)
+ *   Rafiq, dropped at Dhanmondi:  journeyKm 5 + 3 = 8, tripCost 100 + 160 = ৳260
+ *            Mirpur → Mohammadpur   5/8 × 260 = 162.5, / 2 = 81.25, + 20 = 101.25   2 on board
+ *            Mohammadpur → Dhanmondi 3/8 × 260 = 97.5                                  alone again
+ *            exact total 198.75 → ৳199
  */
 import request from 'supertest';
 import { app } from '../index';
 import { sequelize, User, Vehicle, RideRequest, RideEvent, PoolCheckpoint } from '../models';
 import { asUser } from './helpers';
-import { segmentDistanceKm, shareRatePercent } from '../utils/fareCalculator';
 
 let jashim: any;
 let nusrat: any;
@@ -102,21 +103,21 @@ describe('Mid-trip cancellation — CANCELLED_IN_TRANSIT priced from checkpoints
 
   // ─────────────────────────── the fare ───────────────────────────
   describe('the fare comes from the segments actually travelled', () => {
-    it('worked example: Nusrat leaves at Mohammadpur and pays ৳350, not the ৳380 she was on track for', async () => {
+    it('worked example: Nusrat leaves at Mohammadpur and pays ৳332, not the ৳348 she was on track for', async () => {
       const { nusratRide } = await nusratThenRafiq();
-      // Before she leaves: Uttara → Mirpur alone (180) + Mirpur → Dhanmondi with 2 on board (98) → 100 + 278 = 378 → ৳380
-      expect((await ride(nusratRide)).estimatedFare).toBe(380);
+      // Before she leaves: Uttara → Mirpur alone (236.25) + Mirpur → Dhanmondi with 2 on board (111.875) = 348.125 → ৳348
+      expect((await ride(nusratRide)).estimatedFare).toBe(348);
 
       const res = await leave(nusratRide, nusrat, 'Mohammadpur');
 
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', cancellationZone: 'Mohammadpur' });
-      expect(res.body.fare).toMatchObject({ baseCharge: 100, distanceTotal: 280, soloFare: 380, poolDiscount: 30, fare: 350, fullTripEstimate: 380 });
+      expect(res.body.fare).toMatchObject({ soloFare: 380, poolDiscount: 48, fare: 332, fullTripEstimate: 348 });
       expect(res.body.fare.segments).toEqual([
-        { distanceKm: 9, distanceCharge: 180, passengers: 1, ratePercent: 100, charge: 180 },
-        { distanceKm: 5, distanceCharge: 100, passengers: 2, ratePercent: 70, charge: 70 },
+        { distanceKm: 9, passengers: 1, driverBonus: 0, charge: 244 }, // 244.29
+        { distanceKm: 5, passengers: 2, driverBonus: 20, charge: 88 }, // 87.86: the total 332.14 rounds to 332 = 244 + 88
       ]);
-      expect(await ride(nusratRide)).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', cancellationZone: 'Mohammadpur', estimatedFare: 350, poolDiscount: 30 });
+      expect(await ride(nusratRide)).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', cancellationZone: 'Mohammadpur', estimatedFare: 332, poolDiscount: 48 });
       expect(await checkpoints()).toEqual([
         ['Uttara', 1, 'TRIP_STARTED'],
         ['Mirpur', 2, 'PASSENGER_JOINED'],
@@ -124,55 +125,55 @@ describe('Mid-trip cancellation — CANCELLED_IN_TRANSIT priced from checkpoints
       ]);
     });
 
-    it('the passengers who stay are priced only for their own segments: Rafiq pays ৳230', async () => {
+    it('the passengers who stay are priced only for their own segments: Rafiq pays ৳199', async () => {
       const { nusratRide, rafiqRide } = await nusratThenRafiq();
       await leave(nusratRide, nusrat, 'Mohammadpur');
       expect((await driverAction(rafiqRide, 'complete')).status).toBe(200);
 
       const final = await ride(rafiqRide);
-      expect(final).toMatchObject({ status: 'COMPLETED', estimatedFare: 230 });
+      expect(final).toMatchObject({ status: 'COMPLETED', estimatedFare: 199 });
       const bill = (await view(rafiqRide, rafiq)).body.ride.fareBreakdown;
       expect(bill.segments).toEqual([
-        { distanceKm: 5, distanceCharge: 100, passengers: 2, ratePercent: 70, charge: 70 },
-        { distanceKm: 3, distanceCharge: 60, passengers: 1, ratePercent: 100, charge: 60 },
+        { distanceKm: 5, passengers: 2, driverBonus: 20, charge: 101 }, // 101.25
+        { distanceKm: 3, passengers: 1, driverBonus: 0, charge: 98 }, // 97.5: the total 198.75 rounds to 199 = 101 + 98
       ]);
-      expect(bill).toMatchObject({ final: true, fare: 230 });
-      // between them they paid for every stretch exactly once per passenger on it: ৳350 + ৳230
-      expect((await ride(nusratRide)).estimatedFare + final.estimatedFare).toBe(580);
+      expect(bill).toMatchObject({ final: true, fare: 199 });
+      // what the driver earns from the two of them: ৳332 + ৳199
+      expect((await ride(nusratRide)).estimatedFare + final.estimatedFare).toBe(531);
     });
 
     it('a passenger riding alone pays the plain fare for the part travelled', async () => {
       const nusratRide = await joinPool(nusrat);
       await startRide(nusratRide);
-      expect((await ride(nusratRide)).estimatedFare).toBe(420); // 100 + 16 × 20 to Dhanmondi
+      expect((await ride(nusratRide)).estimatedFare).toBe(420); // 100 + 16 × 20 to Dhanmondi, alone: the full trip cost
 
       const res = await leave(nusratRide, nusrat, 'Mirpur');
       // Uttara → Mirpur alone: 100 + 9 × 20 = ৳280
       expect(res.body.fare).toMatchObject({ fare: 280, poolDiscount: 0, fullTripEstimate: 420 });
-      expect(res.body.fare.segments).toEqual([{ distanceKm: 9, distanceCharge: 180, passengers: 1, ratePercent: 100, charge: 180 }]);
+      expect(res.body.fare.segments).toEqual([{ distanceKm: 9, passengers: 1, driverBonus: 0, charge: 280 }]);
     });
 
     it('leaving at the very zone where someone boards adds a 0 km stretch that costs nothing', async () => {
       const { nusratRide, rafiqRide } = await nusratThenRafiq();
       const res = await leave(nusratRide, nusrat, 'Mirpur');
-      // Uttara → Mirpur alone (180); Mirpur → Mirpur is 0 km: 100 + 180 = ৳280, no pool discount earned
+      // Uttara → Mirpur alone (tripCost 100 + 180); Mirpur → Mirpur is 0 km: ৳280, no bonus and no pool discount earned
       expect(res.body.fare).toMatchObject({ fare: 280, poolDiscount: 0 });
       expect(res.body.fare.segments[1]).toMatchObject({ distanceKm: 0, charge: 0 });
 
       await driverAction(rafiqRide, 'complete');
-      // Rafiq: the 0 km stretch with 2 on board, then Mirpur → Dhanmondi alone (140): 100 + 140 = ৳240
+      // Rafiq: the 0 km stretch with 2 on board costs nothing, then Mirpur → Dhanmondi alone: tripCost 100 + 140 = ৳240
       expect((await ride(rafiqRide)).estimatedFare).toBe(240);
     });
 
     it('is not a locked estimate: passengers still on board are re-estimated for who is left', async () => {
       const { nusratRide, rafiqRide } = await nusratThenRafiq();
-      // Rafiq, on board with Nusrat: Mirpur → Dhanmondi at 70% → 100 + 98 = 198 → ৳200
-      expect((await ride(rafiqRide)).estimatedFare).toBe(200);
+      // Rafiq, on board with Nusrat: Mirpur → Dhanmondi with 2 on board: tripCost 240 / 2 + 20 = ৳140
+      expect((await ride(rafiqRide)).estimatedFare).toBe(140);
       await leave(nusratRide, nusrat, 'Mohammadpur');
-      // Now he is alone from Mohammadpur: 70 (Mirpur → Mohammadpur, shared) + 60 = ৳230 if he rides on to Dhanmondi
+      // Now he is alone from Mohammadpur: 101.25 (Mirpur → Mohammadpur, shared) + 97.5 (alone) = 198.75 → ৳199 if he rides on to Dhanmondi
       const r = await ride(rafiqRide);
       expect(r.status).toBe('STARTED');
-      expect(r.estimatedFare).toBe(230);
+      expect(r.estimatedFare).toBe(199);
     });
   });
 
@@ -296,14 +297,14 @@ describe('Mid-trip cancellation — CANCELLED_IN_TRANSIT priced from checkpoints
         status: 'CANCELLED_IN_TRANSIT',
         fromStatus: 'STARTED',
         cancellationZone: 'Mohammadpur',
-        chargedFare: 350,
-        fullTripEstimate: 380,
+        chargedFare: 332,
+        fullTripEstimate: 348,
       });
       expect(left.at).toBeTruthy();
       expect(of(rafiqRide).map((e) => e.status)).toEqual(['REQUESTED', 'MATCHED', 'DRIVER_ARRIVED', 'STARTED']);
 
       const stored = await RideEvent.findOne({ where: { rideRequestId: nusratRide, status: 'CANCELLED_IN_TRANSIT' } });
-      expect(stored).toMatchObject({ actorId: nusrat.id, actorRole: 'PASSENGER', poolSize: 1, cancellationZone: 'Mohammadpur', chargedFare: 350, fullTripEstimate: 380 });
+      expect(stored).toMatchObject({ actorId: nusrat.id, actorRole: 'PASSENGER', poolSize: 1, cancellationZone: 'Mohammadpur', chargedFare: 332, fullTripEstimate: 348 });
     });
 
     it('the cancelling passenger sees their own outcome; nobody else sees it, or the stretches where others boarded', async () => {
@@ -312,12 +313,12 @@ describe('Mid-trip cancellation — CANCELLED_IN_TRANSIT priced from checkpoints
 
       expect((await request(app).get('/passenger/rides/active').set(asUser(nusrat.id))).body.rides).toHaveLength(0);
       const history = (await request(app).get('/passenger/rides/history').set(asUser(nusrat.id))).body.rides;
-      expect(history[0]).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', cancellationZone: 'Mohammadpur', estimatedFare: 350 });
-      expect(history[0].timeline.at(-1)).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', cancellationZone: 'Mohammadpur', chargedFare: 350, fullTripEstimate: 380 });
+      expect(history[0]).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', cancellationZone: 'Mohammadpur', estimatedFare: 332 });
+      expect(history[0].timeline.at(-1)).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', cancellationZone: 'Mohammadpur', chargedFare: 332, fullTripEstimate: 348 });
 
       // Her own breakdown has no zone names: the middle checkpoint is where ANOTHER passenger boarded
       const mine = (await view(nusratRide, nusrat)).body.ride;
-      expect(mine.fareBreakdown).toMatchObject({ final: true, fare: 350 });
+      expect(mine.fareBreakdown).toMatchObject({ final: true, fare: 332 });
       expect(JSON.stringify(mine.fareBreakdown)).not.toMatch(/Mirpur|fromZone|toZone/);
 
       // Rafiq sees his own ride only: still on board, nothing of Nusrat's zone or charge
@@ -335,7 +336,7 @@ describe('Mid-trip cancellation — CANCELLED_IN_TRANSIT priced from checkpoints
       await leave(nusratRide, nusrat, 'Mohammadpur');
       const res = await request(app).get(`/driver/rides/history?driverId=${jashim.id}`);
       const row = res.body.rides.find((r: any) => r.id === nusratRide);
-      expect(row).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', cancellationZone: 'Mohammadpur', estimatedFare: 350 });
+      expect(row).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', cancellationZone: 'Mohammadpur', estimatedFare: 332 });
     });
   });
 
@@ -357,24 +358,17 @@ describe('Mid-trip cancellation — CANCELLED_IN_TRANSIT priced from checkpoints
         bills.push(b);
       }
 
-      // What the checkpoints say was on the road: for every stretch between two checkpoints, km × ৳20 × rate × people on board
-      const cps = await PoolCheckpoint.findAll({ where: { vehicleId: bullet.id }, order: [['id', 'ASC']] });
-      let expectedCharges = 0;
-      for (let i = 0; i + 1 < cps.length; i++) {
-        const c = cps[i]!;
-        const km = segmentDistanceKm(c.zone, cps[i + 1]!.zone);
-        expectedCharges += (km * 20 * shareRatePercent(c.passengerCount) * c.passengerCount) / 100;
-      }
-      const chargedSegments = bills.flatMap((b) => b.segments).reduce((s: number, x: any) => s + x.charge, 0);
-      expect(chargedSegments).toBe(expectedCharges); // nothing double-counted, nothing dropped
-
-      // and the fares are those charges plus one ৳100 base fare each, each rounded to the nearest ৳5
+      // Nusrat: journeyKm 9 + 0 + 5 = 14, tripCost 380. Uttara → Mirpur alone 244.29; Mirpur → Mohammadpur with 3 on board
+      //         5/14 × 380 = 135.71 / 3 + 20 = 65.24. Exact total 309.52 → ৳310.
+      // Rafiq and Shirin: journeyKm 5 + 3 = 8, tripCost 260. Mirpur → Mohammadpur, 3 on board: 162.5 / 3 + 20 = 74.17;
+      //         Mohammadpur → Dhanmondi, 2 left: 97.5 / 2 + 20 = 68.75. Exact total 142.92 → ৳143 each.
       const fares = await Promise.all(rides.map(async (id) => (await ride(id)).estimatedFare));
-      const exact = 3 * 100 + chargedSegments;
-      expect(Math.abs(fares.reduce((a, b) => a + b, 0) - exact)).toBeLessThanOrEqual(3 * 2.5);
-      // Nusrat: 100 + 180 (alone) + 55 (Mirpur → Mohammadpur, 3 on board: 100 × 55%) = 335.
-      // Rafiq and Shirin: 100 + 55 + 42 (Mohammadpur → Dhanmondi, 2 left: 60 × 70%) = 197 → 195 each.
-      expect(fares).toEqual([335, 195, 195]);
+      expect(fares).toEqual([310, 143, 143]);
+
+      // each bill's stretches add up to that passenger's fare: nothing dropped, nothing double-counted
+      bills.forEach((b, i) => expect(b.segments.reduce((sum: number, x: any) => sum + x.charge, 0)).toBe(fares[i]));
+      // what the driver earns for the whole run
+      expect(fares.reduce((a, b) => a + b, 0)).toBe(596);
     });
   });
 });

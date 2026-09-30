@@ -112,11 +112,11 @@ export class RideRequest extends Model {
   public baseFare!: number;
 
   /**
-   * What this passenger pays — whole taka, a multiple of ৳5.
-   *   estimatedFare = ৳100 + distance charge × share rate (100% alone, 70% with 2 passengers, 55% with 3)
+   * What this passenger pays — whole taka.
+   *   estimatedFare = trip cost / riders on board + ৳20 driver bonus (trip cost alone), stretch by stretch
    * An ESTIMATE that follows the pool (see utils/poolFares.ts) until the passenger's own journey ends,
    * when it is settled from the pool's checkpoints and becomes final (COMPLETED / CANCELLED_IN_TRANSIT,
-   * see segmentFare in utils/fareCalculator.ts). A private ride (allowSharing = false) always pays 100%.
+   * see segmentFare in utils/fareCalculator.ts). A private ride (allowSharing = false) always pays the full trip cost.
    */
   public estimatedFare!: number;
 

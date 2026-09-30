@@ -173,11 +173,11 @@ describe('pool info', () => {
     expect(Object.keys(pool).sort()).toEqual(['isShared', 'otherPassengers', 'poolSize', 'seatCapacity', 'seatsTaken']);
   });
 
-  it('Nusrat sees only her own fare: ৳155 (saves ৳25), and Rafiq sees his own', async () => {
+  it('Nusrat sees only her own fare: ৳110 (saves ৳70), and Rafiq sees his own', async () => {
     const nusratRide = await bookAndAccept(nusrat);
     const rafiqRide = await bookAndAccept(rafiq);
-    expect((await view(nusratRide, nusrat)).body.ride).toMatchObject({ estimatedFare: 155, poolDiscount: 25, baseFare: 180 });
-    expect((await view(rafiqRide, rafiq)).body.ride).toMatchObject({ estimatedFare: 155, poolDiscount: 25 });
+    expect((await view(nusratRide, nusrat)).body.ride).toMatchObject({ estimatedFare: 110, poolDiscount: 70, baseFare: 180 });
+    expect((await view(rafiqRide, rafiq)).body.ride).toMatchObject({ estimatedFare: 110, poolDiscount: 70 });
   });
 
   it('with three passengers the two others are listed by first name', async () => {
