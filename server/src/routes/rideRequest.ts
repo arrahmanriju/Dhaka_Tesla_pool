@@ -10,7 +10,7 @@ import {
 } from '../models/RideRequest';
 import { calculateBaseFare, estimateFare, shareRatePercent } from '../utils/fareCalculator';
 import { isFareLocked, recalculatePoolFares } from '../utils/poolFares';
-import { checkPoolJoin, PoolVerdict } from '../utils/pooling';
+import { checkPoolJoin, loadPool, PoolVerdict } from '../utils/pooling';
 import { recordRideEvent } from '../utils/rideEvents';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 
@@ -272,13 +272,8 @@ router.get('/pending', async (req: Request, res: Response) => {
     const availableSeats = vehicle.seatCapacity - vehicle.occupiedSeats;
 
     // Rides currently on this vehicle: they decide who else can join.
-    const pool: any[] = await RideRequest.findAll({
-      where: {
-        vehicleId: vehicle.id,
-        status: { [Op.in]: [...POOL_JOINABLE_STATUSES] },
-      },
-    });
-    const midTrip = pool.some((r: any) => r.status === 'STARTED');
+    const pool = await loadPool(vehicle.id);
+    const midTrip = pool.some((r) => r.status === 'STARTED');
 
     // Requests this driver has already declined never come back to them.
     const declined = await RideDecline.findAll({ where: { driverId }, attributes: ['rideRequestId'] });
@@ -352,10 +347,7 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
 
     await sequelize.transaction({ type: Transaction.TYPES.IMMEDIATE }, async (t: any) => {
       // ── STEP 1: Who is on the vehicle right now, and may this passenger join them? ──
-      const pool: any[] = await RideRequest.findAll({
-        where: { vehicleId: vehicle.id, status: { [Op.in]: [...POOL_JOINABLE_STATUSES] } },
-        transaction: t,
-      });
+      const pool = await loadPool(vehicle.id, t);
       const candidate: any = await RideRequest.findOne({ where: { id: rideReq.id, status: 'REQUESTED' }, transaction: t });
       if (!candidate) throw new Error('ALREADY_TAKEN');
 

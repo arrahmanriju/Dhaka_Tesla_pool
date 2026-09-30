@@ -235,6 +235,88 @@ describe('Mid-trip pooling — Jashim (Bullet, 3 seats), Nusrat, Rafiq, Shirin',
     });
   });
 
+  // ─────────────────────────── the stricter filter for a trip under way ───────────────────────────
+  describe('a started trip only shows requests on its road ahead (filter, not sort)', () => {
+    const BANANI_TO_GULSHAN: Trip = { pickupZone: 'Banani', destinationZone: 'Gulshan' };
+
+    it('a pickup off the road is hidden and refused once the trip has started, but fine before it starts', async () => {
+      // Before the start: Banani → Gulshan is a parallel road 1.5 km away, which the ordinary rule allows.
+      const nusratRide = await joinPool(nusrat);
+      const early = await requestRide(rafiq, BANANI_TO_GULSHAN);
+      expect(await pendingIds()).toContain(early.body.rideRequest.id);
+
+      // After the start the same request needs a detour, so it disappears from the list...
+      await startRide(nusratRide);
+      expect(await pendingIds()).not.toContain(early.body.rideRequest.id);
+      // ...and accepting it is refused.
+      const res = await accept(early.body.rideRequest.id);
+      expect(res.status).toBe(409);
+      expect(res.body.error).toMatch(/incompatible.*not on the vehicle/i);
+      expect(await statusOf(early.body.rideRequest.id)).toBe('REQUESTED');
+      expect(await occupied()).toBe(1);
+    });
+
+    it('every request in the pending list can actually be accepted, and nothing else can', async () => {
+      await nusratIsTravelling();
+      const trips: Trip[] = [
+        { pickupZone: 'Mohakhali', destinationZone: 'Gulshan 1' }, // yes
+        { pickupZone: 'Gulshan 1', destinationZone: 'Badda' }, // yes
+        BANANI_TO_GULSHAN, // off the road
+        { pickupZone: 'Mohakhali', destinationZone: 'Dhanmondi' }, // opposite way
+        { pickupZone: 'Badda', destinationZone: 'Gulshan 1' }, // reverse
+      ];
+      const passengers = [rafiq, shirin, tania];
+      const extra = (await User.create({ name: 'Omar Test', phone: '01712000008', email: 'omar-mt@test.com', password: 'x', role: 'PASSENGER' })).toJSON() as any;
+      const extra2 = (await User.create({ name: 'Lima Test', phone: '01712000009', email: 'lima-mt@test.com', password: 'x', role: 'PASSENGER' })).toJSON() as any;
+      const ids: string[] = [];
+      for (const [i, trip] of trips.entries()) {
+        ids.push((await requestRide([...passengers, extra, extra2][i]!, trip)).body.rideRequest.id);
+      }
+
+      const offered = await pendingIds();
+      expect(offered.sort()).toEqual([ids[0]!, ids[1]!].sort());
+      for (const id of ids.slice(2)) expect((await accept(id)).status).toBe(409);
+      // The list is a live view: accepting the first changes what the second needs (Gulshan 1 → Badda would
+      // start where Rafiq's trip ends), so the list is re-read after each accept and anything it shows works.
+      let accepted = 0;
+      for (let ids = await pendingIds(); ids.length > 0; ids = await pendingIds()) {
+        expect((await accept(ids[0]!)).status).toBe(200);
+        accepted++;
+      }
+      expect(accepted).toBe(1);
+    });
+
+    it('the car’s position moves on: once a later pickup has started, requests behind it are hidden', async () => {
+      await nusratIsTravelling();
+      const rafiqRide = await joinPool(rafiq, { pickupZone: 'Gulshan 1', destinationZone: 'Badda' });
+      const behind = await requestRide(shirin, MOHAKHALI_TO_BADDA); // pickup Mohakhali
+      const ahead = await requestRide(tania, { pickupZone: 'Gulshan 1', destinationZone: 'Badda' });
+
+      // Rafiq is not on board yet: the car is still taken to be at Mohakhali, so both are offered.
+      expect(await pendingIds()).toEqual(expect.arrayContaining([behind.body.rideRequest.id, ahead.body.rideRequest.id]));
+
+      // Rafiq gets in at Gulshan 1: the car is now at least there, so Mohakhali is behind it.
+      await startRide(rafiqRide);
+      const ids = await pendingIds();
+      expect(ids).toContain(ahead.body.rideRequest.id);
+      expect(ids).not.toContain(behind.body.rideRequest.id);
+      const res = await accept(behind.body.rideRequest.id);
+      expect(res.status).toBe(409);
+      expect(res.body.error).toMatch(/behind/i);
+    });
+
+    it('a destination that leaves the road is hidden even if it starts on it', async () => {
+      await nusratIsTravelling({ pickupZone: 'Mohakhali', destinationZone: 'Banani' });
+      const far = await requestRide(shirin, { pickupZone: 'Mohakhali', destinationZone: 'Uttara' });
+      const near = await requestRide(rafiq, { pickupZone: 'Mohakhali', destinationZone: 'Banani' });
+
+      const ids = await pendingIds();
+      expect(ids).toContain(near.body.rideRequest.id);
+      expect(ids).not.toContain(far.body.rideRequest.id);
+      expect((await accept(far.body.rideRequest.id)).body.error).toMatch(/destination/i);
+    });
+  });
+
   // ─────────────────────────── capacity ───────────────────────────
   describe('capacity', () => {
     it('a mid-trip request for more seats than are left is not offered and is rejected', async () => {
@@ -312,15 +394,15 @@ describe('Mid-trip pooling — Jashim (Bullet, 3 seats), Nusrat, Rafiq, Shirin',
   describe('privacy between passengers who join at different points', () => {
     async function threeOnBullet() {
       const nusratRide = await nusratIsTravelling();
-      const rafiqRide = await joinPool(rafiq, { pickupZone: 'Banani', destinationZone: 'Gulshan' }); // base ৳140
-      const shirinRide = await joinPool(shirin, { pickupZone: 'Mohakhali', destinationZone: 'Gulshan 1' }); // base ৳180
+      const rafiqRide = await joinPool(rafiq, { pickupZone: 'Gulshan 1', destinationZone: 'Badda' }); // base ৳160
+      const shirinRide = await joinPool(shirin, MOHAKHALI_TO_BADDA); // base ৳180
       return { nusratRide, rafiqRide, shirinRide };
     }
 
-    it('fares are per passenger: Nusrat ৳180 (locked), Rafiq ৳75, Shirin ৳100', async () => {
+    it('fares are per passenger: Nusrat ৳180 (locked), Rafiq ৳90, Shirin ৳100', async () => {
       const { nusratRide, rafiqRide, shirinRide } = await threeOnBullet();
       expect(await fareOf(nusratRide)).toBe(180);
-      expect(await fareOf(rafiqRide)).toBe(75); // 55% of 140 = 77 → 75
+      expect(await fareOf(rafiqRide)).toBe(90); // 55% of 160 = 88 → 90
       expect(await fareOf(shirinRide)).toBe(100);
     });
 
@@ -334,11 +416,11 @@ describe('Mid-trip pooling — Jashim (Bullet, 3 seats), Nusrat, Rafiq, Shirin',
       };
 
       // Own fare only
-      expect((await passengerActive(r)).body.rides[0]).toMatchObject({ estimatedFare: 75 });
+      expect((await passengerActive(r)).body.rides[0]).toMatchObject({ estimatedFare: 90 });
       expect((await passengerActive(n)).body.rides[0]).toMatchObject({ estimatedFare: 180, fareLocked: true });
       expect(bodies.rafiq).not.toMatch(/"estimatedFare":(180|100)\b/);
-      expect(bodies.nusrat).not.toMatch(/"estimatedFare":(75|100)\b/);
-      expect(bodies.shirin).not.toMatch(/"estimatedFare":(180|75)\b/);
+      expect(bodies.nusrat).not.toMatch(/"estimatedFare":(90|100)\b/);
+      expect(bodies.shirin).not.toMatch(/"estimatedFare":(180|90)\b/);
 
       // No ids or phone numbers of the others
       for (const [me, others] of [[n, [r, s]], [r, [n, s]], [s, [n, r]]] as const) {
@@ -348,9 +430,9 @@ describe('Mid-trip pooling — Jashim (Bullet, 3 seats), Nusrat, Rafiq, Shirin',
           expect(text).not.toContain(other.phone);
         }
       }
-      // Rafiq's Banani → Gulshan route is not visible to Nusrat; Nusrat's Badda destination is not visible to Rafiq
-      expect(bodies.nusrat).not.toContain('Banani');
-      expect(bodies.rafiq).not.toContain('Badda');
+      // Rafiq's Gulshan 1 pickup is not visible to Nusrat; Nusrat's Mohakhali pickup is not visible to Rafiq
+      expect(bodies.nusrat).not.toContain('Gulshan 1');
+      expect(bodies.rafiq).not.toContain('Mohakhali');
       // ...only first names of the others
       expect((await passengerActive(r)).body.rides[0].pool.otherPassengers).toEqual([{ firstName: 'Nusrat' }, { firstName: 'Shirin' }]);
     });
