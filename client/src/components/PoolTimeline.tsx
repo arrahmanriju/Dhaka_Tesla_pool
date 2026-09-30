@@ -24,14 +24,14 @@ export function PoolTimeline({ refreshKey }: { refreshKey: unknown }) {
   const label = (e: PoolEvent) =>
     e.status === 'CANCELLED_IN_TRANSIT'
       ? t('d.timeline.CANCELLED_IN_TRANSIT', {
-          name: e.passengerFirstName,
+          name: e.passengerLabel ?? 'Passenger',
           zone: e.cancellationZone ? tz(e.cancellationZone) : '—',
           fare: e.chargedFare ?? 0,
           estimate: e.fullTripEstimate ?? 0,
         })
       : e.joinedMidTrip
-      ? t('d.timeline.MATCHED_MID', { name: e.passengerFirstName, n: e.ridersOnboard })
-      : t(`d.timeline.${e.status}` as TranslationKey, { name: e.passengerFirstName });
+      ? t('d.timeline.MATCHED_MID', { name: e.passengerLabel ?? 'Passenger', n: e.ridersOnboard })
+      : t(`d.timeline.${e.status}` as TranslationKey, { name: e.passengerLabel ?? 'Passenger' });
 
   return (
     <section className="card" id="pool-timeline" style={{ marginTop: 16 }}>

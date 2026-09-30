@@ -448,8 +448,9 @@ describe('Mid-trip pooling — Jashim (Bullet, 3 seats), Nusrat, Rafiq, Shirin',
       // Rafiq's Gulshan 1 pickup is not visible to Nusrat; Nusrat's Mohakhali pickup is not visible to Rafiq
       expect(bodies.nusrat).not.toContain('Gulshan 1');
       expect(bodies.rafiq).not.toContain('Mohakhali');
-      // ...only first names of the others
-      expect((await passengerActive(r)).body.rides[0].pool.otherPassengers).toEqual([{ firstName: 'Nusrat' }, { firstName: 'Shirin' }]);
+      // ...and the others only as Passenger N (Nusrat was accepted first, Shirin third): never a name
+      expect((await passengerActive(r)).body.rides[0].pool.otherPassengers).toEqual([{ label: 'Passenger 1', number: 1 }, { label: 'Passenger 3', number: 3 }]);
+      for (const text of Object.values(bodies)) expect(text).not.toMatch(/Nusrat|Rafiq|Shirin/);
     });
 
     it('a passenger cannot open, cancel or list another passenger’s ride', async () => {
@@ -497,9 +498,9 @@ describe('Mid-trip pooling — Jashim (Bullet, 3 seats), Nusrat, Rafiq, Shirin',
 
       // Nusrat matched into an empty car; Rafiq and Shirin were matched while Nusrat was already travelling
       const matched = (rideId: string) => of(rideId).find((e) => e.status === 'MATCHED');
-      expect(matched(nusratRide)).toMatchObject({ joinedMidTrip: false, ridersOnboard: 0, poolSize: 1, passengerFirstName: 'Nusrat' });
-      expect(matched(rafiqRide)).toMatchObject({ joinedMidTrip: true, ridersOnboard: 1, poolSize: 2, passengerFirstName: 'Rafiq' });
-      expect(matched(shirinRide)).toMatchObject({ joinedMidTrip: true, ridersOnboard: 1, poolSize: 3, passengerFirstName: 'Shirin' });
+      expect(matched(nusratRide)).toMatchObject({ joinedMidTrip: false, ridersOnboard: 0, poolSize: 1, passengerLabel: 'Passenger 1' });
+      expect(matched(rafiqRide)).toMatchObject({ joinedMidTrip: true, ridersOnboard: 1, poolSize: 2, passengerLabel: 'Passenger 2' });
+      expect(matched(shirinRide)).toMatchObject({ joinedMidTrip: true, ridersOnboard: 1, poolSize: 3, passengerLabel: 'Passenger 3' });
 
       // Oldest first, in the order things happened
       const ids = events.map((e) => e.id);

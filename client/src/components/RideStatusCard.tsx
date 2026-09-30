@@ -265,12 +265,12 @@ export function RideStatusCard({
           {ride.joinedMidTrip && (
             <div className="ride-block__line" id="pool-joined-mid-trip">{t('rs.joinedMidTrip')}</div>
           )}
-          {street && ride.qrPassengerNumber != null && (
-            <div className="ride-block__line" id="pool-you">{t('qr.youAre', { n: ride.qrPassengerNumber })}</div>
+          {pool.yourNumber != null && (
+            <div className="ride-block__line" id="pool-you">{t('qr.youAre', { n: pool.yourNumber })}</div>
           )}
           {pool.otherPassengers.length > 0 && (
             <div className="ride-block__line" id="pool-others">
-              {t('rs.ridingWith')}: <strong>{pool.otherPassengers.map((p) => p.firstName).join(', ')}</strong>
+              {t('rs.ridingWith')}: <strong>{pool.otherPassengers.map((p) => p.label).join(', ')}</strong>
             </div>
           )}
         </section>

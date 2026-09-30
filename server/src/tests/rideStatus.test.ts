@@ -131,10 +131,10 @@ describe('pool info', () => {
   it('a passenger alone on the Bullet sees "just you": not shared, 1 of 3 seats taken', async () => {
     const id = await bookAndAccept(nusrat);
     const { pool } = (await view(id, nusrat)).body.ride;
-    expect(pool).toEqual({ isShared: false, poolSize: 1, otherPassengers: [], seatsTaken: 1, seatCapacity: 3 });
+    expect(pool).toEqual({ isShared: false, poolSize: 1, otherPassengers: [], yourNumber: 1, seatsTaken: 1, seatCapacity: 3 });
   });
 
-  it('Nusrat and Rafiq sharing: Nusrat sees "1 other passenger · Rafiq" and 2 of 3 seats taken', async () => {
+  it('Nusrat and Rafiq sharing: Nusrat sees "1 other passenger · Passenger 2" and 2 of 3 seats taken', async () => {
     const nusratRide = await bookAndAccept(nusrat);
     await bookAndAccept(rafiq);
 
@@ -142,7 +142,8 @@ describe('pool info', () => {
     expect(ride.pool).toEqual({
       isShared: true,
       poolSize: 2,
-      otherPassengers: [{ firstName: 'Rafiq' }], // first name only, not "Rafiq Ahmed"
+      otherPassengers: [{ label: 'Passenger 2', number: 2 }], // never a name, not even a first name
+      yourNumber: 1,
       seatsTaken: 2,
       seatCapacity: 3,
     });
@@ -150,7 +151,7 @@ describe('pool info', () => {
     expect(ride.isSharedRide).toBe(true);
   });
 
-  it('Nusrat never sees Rafiq\'s phone number, fare, destination, surname or ids', async () => {
+  it('Nusrat never sees Rafiq\'s name, phone number, fare, destination or ids', async () => {
     const nusratRide = await bookAndAccept(nusrat);
     const rafiqRide = await bookAndAccept(rafiq);
 
@@ -161,16 +162,17 @@ describe('pool info', () => {
       const text = JSON.stringify(res.body);
       expect(text).not.toContain(rafiq.phone); // 01711000002
       expect(text).not.toContain('Ahmed'); // surname
+      expect(text).not.toContain('Rafiq'); // not even the first name: he is "Passenger 2"
       expect(text).not.toContain(rafiq.id); // passenger id
       expect(text).not.toContain(rafiqRide); // ride id
     }
 
-    // The other passenger is exactly { firstName } — there is no field that could carry a fare,
-    // destination or phone.
+    // The other passenger is exactly { label, number } — there is no field that could carry a name, fare,
+    // destination, phone or id.
     const { pool } = (await view(nusratRide, nusrat)).body.ride;
-    expect(pool.otherPassengers[0]).toEqual({ firstName: 'Rafiq' });
-    expect(Object.keys(pool.otherPassengers[0])).toEqual(['firstName']);
-    expect(Object.keys(pool).sort()).toEqual(['isShared', 'otherPassengers', 'poolSize', 'seatCapacity', 'seatsTaken']);
+    expect(pool.otherPassengers[0]).toEqual({ label: 'Passenger 2', number: 2 });
+    expect(Object.keys(pool.otherPassengers[0]).sort()).toEqual(['label', 'number']);
+    expect(Object.keys(pool).sort()).toEqual(['isShared', 'otherPassengers', 'poolSize', 'seatCapacity', 'seatsTaken', 'yourNumber']);
   });
 
   it('Nusrat sees only her own fare: ৳110 (saves ৳70), and Rafiq sees his own', async () => {
@@ -180,12 +182,13 @@ describe('pool info', () => {
     expect((await view(rafiqRide, rafiq)).body.ride).toMatchObject({ estimatedFare: 110, poolDiscount: 70 });
   });
 
-  it('with three passengers the two others are listed by first name', async () => {
+  it('with three passengers the two others are Passenger 2 and Passenger 3', async () => {
     const nusratRide = await bookAndAccept(nusrat);
     await bookAndAccept(rafiq);
     await bookAndAccept(shirin);
     const { pool } = (await view(nusratRide, nusrat)).body.ride;
-    expect(pool.otherPassengers.map((p: any) => p.firstName).sort()).toEqual(['Rafiq', 'Shirin']);
+    expect(pool.otherPassengers.map((p: any) => p.label)).toEqual(['Passenger 2', 'Passenger 3']);
+    expect(pool.yourNumber).toBe(1);
     expect(pool).toMatchObject({ isShared: true, poolSize: 3, seatsTaken: 3, seatCapacity: 3 });
   });
 
@@ -201,7 +204,7 @@ describe('pool info', () => {
     expect((await view(nusratRide, nusrat)).body.ride.pool.isShared).toBe(false);
 
     const rafiqRide = await bookAndAccept(rafiq);
-    expect((await view(nusratRide, nusrat)).body.ride.pool.otherPassengers).toEqual([{ firstName: 'Rafiq' }]);
+    expect((await view(nusratRide, nusrat)).body.ride.pool.otherPassengers).toEqual([{ label: 'Passenger 2', number: 2 }]);
 
     await passengerCancel(rafiqRide, rafiq);
     const after = (await view(nusratRide, nusrat)).body.ride;
@@ -258,7 +261,7 @@ describe('ride status, fare and actions', () => {
     const list = await request(app).get('/passenger/rides/active').set(asUser(nusrat.id));
     expect(list.body.rides[0]).toMatchObject({
       driver: { name: 'Jashim', phone: '01711000000', teslaId: 'DTP-0001' },
-      pool: { isShared: true, otherPassengers: [{ firstName: 'Rafiq' }], seatsTaken: 2, seatCapacity: 3 },
+      pool: { isShared: true, otherPassengers: [{ label: 'Passenger 2', number: 2 }], seatsTaken: 2, seatCapacity: 3 },
     });
   });
 
@@ -323,9 +326,11 @@ describe('a passenger can only reach their own ride', () => {
 
   it('each passenger only ever lists their own rides', async () => {
     await bookAndAccept(nusrat);
-    await bookAndAccept(rafiq);
+    const rafiqRide = await bookAndAccept(rafiq);
     const list = await request(app).get('/passenger/rides/active').set(asUser(rafiq.id));
     expect(list.body.rides).toHaveLength(1);
-    expect(list.body.rides[0].passengerId).toBe(rafiq.id);
+    expect(list.body.rides[0].id).toBe(rafiqRide);
+    expect(JSON.stringify(list.body)).not.toContain(nusrat.id); // and no user id at all (not even her own)
+    expect(JSON.stringify(list.body)).not.toContain(rafiq.id);
   });
 });

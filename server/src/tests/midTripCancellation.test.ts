@@ -344,7 +344,7 @@ describe('Mid-trip cancellation — CANCELLED_IN_TRANSIT pays half of the quoted
       expect(of(nusratRide).map((e) => e.status)).toEqual(['REQUESTED', 'MATCHED', 'DRIVER_ARRIVED', 'STARTED', 'CANCELLED_IN_TRANSIT']);
       const left = of(nusratRide).at(-1);
       expect(left).toMatchObject({
-        passengerFirstName: 'Nusrat',
+        passengerLabel: 'Passenger 1',
         status: 'CANCELLED_IN_TRANSIT',
         fromStatus: 'STARTED',
         cancellationZone: 'Mohammadpur',

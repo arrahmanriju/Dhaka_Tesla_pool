@@ -220,10 +220,11 @@ describe('Pool fare split — Nusrat, Rafiq, Shirin and Jashim (Bullet)', () => 
       await joinPool(nusrat);
       await joinPool(rafiq);
       const body = JSON.stringify((await passengerActive(nusrat)).body);
-      // Only the co-passenger's FIRST NAME is shown (see rideStatus.test.ts): no id, phone or fare of theirs.
+      // The co-passenger is only "Passenger 2" (see rideStatus.test.ts): no name, id, phone or fare of theirs.
       expect(body).not.toContain(rafiq.id);
       expect(body).not.toContain(rafiq.phone);
-      expect((await passengerActive(nusrat)).body.rides[0].pool.otherPassengers).toEqual([{ firstName: 'Rafiq' }]);
+      expect(body).not.toContain('Rafiq');
+      expect((await passengerActive(nusrat)).body.rides[0].pool.otherPassengers).toEqual([{ label: 'Passenger 2', number: 2 }]);
     });
   });
 

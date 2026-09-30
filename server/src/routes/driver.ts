@@ -5,6 +5,7 @@ import { validateTransition, RideStatus, TERMINAL_STATUSES } from '../models/Rid
 import { isFareFinal, recalculatePoolFares } from '../utils/poolFares';
 import { recordBoarding, recordExit } from '../utils/checkpoints';
 import { settleJourney } from '../utils/journeySettlement';
+import { passengerLabel } from '../utils/passengerLabels';
 import { collectPayment } from '../utils/payments';
 import { releaseSeats } from '../utils/seats';
 import { recordRideEvent, joinedMidTrip } from '../utils/rideEvents';
@@ -277,7 +278,7 @@ router.get('/rides/active', async (req: Request, res: Response) => {
 
     const summary = activeRides.map((r: any) => ({
       id: r.id,
-      passengerId: r.passengerId,
+      passengerLabel: passengerLabel(r.poolNumber), // "Passenger N": never a name or a user id
       pickupZone: r.pickupZone,
       destinationZone: r.destinationZone,
       seatCount: r.seatCount,
@@ -343,7 +344,7 @@ router.get('/rides/history', async (req: Request, res: Response) => {
     res.json({
       rides: history.map((r: any) => ({
         id: r.id,
-        passengerId: r.passengerId,
+        passengerLabel: passengerLabel(r.poolNumber),
         pickupZone: r.pickupZone,
         destinationZone: r.destinationZone,
         seatCount: r.seatCount,
@@ -405,7 +406,8 @@ router.get('/rides/pool', async (req: Request, res: Response) => {
       totalSeatsUsed,
       passengers: poolRides.map((r: any) => ({
         rideId: r.id,
-        // No passenger name/email — only operational data
+        // "Passenger N", never a name, email or user id — only operational data
+        passengerLabel: passengerLabel(r.poolNumber),
         pickupZone: r.pickupZone,
         destinationZone: r.destinationZone,
         seatCount: r.seatCount,
@@ -427,15 +429,17 @@ router.get('/rides/pool', async (req: Request, res: Response) => {
 // The lifecycle history of the rides this driver has carried, oldest first (the latest 200
 // events): who was requested, matched, arrived, started, completed or cancelled, and when.
 // `joinedMidTrip` marks a passenger matched while someone else was already travelling;
-// `ridersOnboard` is how many were travelling at that moment. Passengers appear by FIRST NAME only.
+// `ridersOnboard` is how many were travelling at that moment. Passengers appear only as "Passenger N"
+// (the same rule as the QR street rides): no name, not even a first name, and no user id.
 // ---------------------------------------------------------------------------
 router.get('/rides/timeline', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     if (req.user!.role !== 'DRIVER') return res.status(403).json({ error: 'Only drivers can view this.' });
     const driverId = req.user!.id;
 
-    const rides: any[] = await RideRequest.findAll({ where: { driverId }, attributes: ['id', 'passengerId'] });
+    const rides: any[] = await RideRequest.findAll({ where: { driverId }, attributes: ['id', 'poolNumber'] });
     if (rides.length === 0) return res.json({ events: [] });
+    const labelOf = new Map(rides.map((r) => [r.id as string, passengerLabel(r.poolNumber)]));
 
     const events: any[] = await RideEvent.findAll({
       where: { rideRequestId: { [Op.in]: rides.map((r) => r.id) } },
@@ -444,17 +448,11 @@ router.get('/rides/timeline', authenticateToken, async (req: AuthenticatedReques
     });
     events.reverse();
 
-    const users: any[] = await User.findAll({
-      where: { id: [...new Set(rides.map((r) => r.passengerId))] },
-      attributes: ['id', 'name'],
-    });
-    const first = new Map(users.map((u) => [u.id, ((u.name ?? '').trim().split(/\s+/)[0]) ?? '']));
-
     res.json({
       events: events.map((e) => ({
         id: e.id,
         rideId: e.rideRequestId,
-        passengerFirstName: first.get(e.passengerId) ?? '',
+        passengerLabel: labelOf.get(e.rideRequestId) ?? null,
         status: e.status,
         fromStatus: e.fromStatus,
         at: e.createdAt,

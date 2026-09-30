@@ -150,11 +150,16 @@ export interface RideDriver {
   teslaId: string | null;
 }
 
-/** Who else is on the vehicle: first names only — never a phone number, fare or destination. */
+/**
+ * Who else is on the vehicle: only as "Passenger N" (their number in the car, in the order they were accepted),
+ * the same as a street ride. Never a name, phone number, fare, destination or user id.
+ */
 export interface RidePool {
   isShared: boolean;
   poolSize: number;
-  otherPassengers: { firstName: string }[];
+  otherPassengers: { label: string; number: number }[];
+  /** This passenger's own number: "You are Passenger N" */
+  yourNumber?: number | null;
   seatsTaken: number;
   seatCapacity: number;
 }
@@ -233,8 +238,6 @@ export interface Ride {
   joinedMidTrip?: boolean;
   /** Which flow a history row came from: the app, or a street ride joined by QR code */
   source?: 'APP' | 'QR';
-  /** A street ride on the Active Ride page: "You are Passenger N" */
-  qrPassengerNumber?: number;
   /** Only on a QR row: what a street trip has that an app ride does not */
   qr?: {
     sessionId: string;
@@ -255,11 +258,11 @@ export interface Ride {
   updatedAt: string;
 }
 
-/** One step in the driver's pool history. Passengers appear by first name only. */
+/** One step in the driver's pool history. Passengers appear only as "Passenger N": no name and no user id. */
 export interface PoolEvent {
   id: number;
   rideId: string;
-  passengerFirstName: string;
+  passengerLabel: string | null;
   status: RideStatus;
   at: string;
   poolSize: number;
@@ -535,7 +538,7 @@ export const driverApi = {
     }),
 
   getPassengers: (rideId: string, driverId: string) =>
-    request<{ passengers: Array<{ passengerId: string; seatCount: number; status: RideStatus }> }>(
+    request<{ passengers: Array<{ rideId: string; passengerLabel: string | null; seatCount: number; status: RideStatus }> }>(
       `/driver/rides/${rideId}/passengers?driverId=${driverId}`
     ),
 

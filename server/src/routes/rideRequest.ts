@@ -10,6 +10,7 @@ import {
   TERMINAL_STATUSES,
 } from '../models/RideRequest';
 import { calculateBaseFare, estimateFare } from '../utils/fareCalculator';
+import { nextPoolNumber, passengerLabel } from '../utils/passengerLabels';
 import { isFareFinal, recalculatePoolFares } from '../utils/poolFares';
 import { checkPoolJoin, loadPool, PoolVerdict } from '../utils/pooling';
 import { recordRideEvent } from '../utils/rideEvents';
@@ -25,7 +26,8 @@ const router = Router();
 function formatRide(r: any) {
   return {
     id: r.id,
-    passengerId: r.passengerId,
+    // Never the passenger's user id, and never their name: a driver sees "Passenger N" (null until accepted)
+    passengerLabel: passengerLabel(r.poolNumber),
     driverId: r.driverId ?? null,
     vehicleId: r.vehicleId ?? null,
     pickupZone: r.pickupZone,
@@ -385,11 +387,14 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
 
       // ── STEP 3: Atomically transition the ride to MATCHED ───────────────
       // WHERE status='REQUESTED' prevents double-acceptance by two drivers.
+      // "Passenger N": the next number in this car (utils/passengerLabels.ts), fixed for the ride's lifetime.
+      const poolNumber = await nextPoolNumber(vehicle.id, t);
       const [reqUpdatedCount] = await RideRequest.update(
         {
           status: 'MATCHED',
           vehicleId: vehicle.id,
           driverId,
+          poolNumber,
         },
         {
           where: { id: candidate.id, status: 'REQUESTED' },

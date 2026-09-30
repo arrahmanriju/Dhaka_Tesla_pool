@@ -130,6 +130,12 @@ export class RideRequest extends Model {
    */
   public quotedFare!: number | null;
 
+  /**
+   * "Passenger N": this passenger's number in the car, in the order they were accepted (see utils/passengerLabels.ts).
+   * null until a driver accepts the ride. It is the ONLY way a passenger is named to a driver or a co-passenger.
+   */
+  public poolNumber!: number | null;
+
   /** Where the passenger left the ride, when it ended CANCELLED_IN_TRANSIT. `estimatedFare` is then half of `quotedFare`. */
   public cancellationZone!: string | null;
 
@@ -206,6 +212,11 @@ export const initRideRequest = (sequelize: any) => {
         allowNull: false,
         defaultValue: 0,
         validate: { isInt: true },
+      },
+      poolNumber: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        validate: { isInt: true, min: 1 },
       },
       quotedFare: {
         type: DataTypes.INTEGER,

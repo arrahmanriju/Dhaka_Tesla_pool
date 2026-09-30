@@ -51,12 +51,12 @@ test('route, fare and cash payment are this passenger\'s own', () => {
   assert.equal(ride.fareFinal, false);
   assert.equal(ride.paymentMethod, 'cash');
   assert.equal(ride.source, 'QR');
-  assert.equal(ride.qrPassengerNumber, 2);
+  assert.equal(ride.pool?.yourNumber, 2);
 });
 
 test('the others are "Passenger N", only those still riding, and never this passenger', () => {
   const pool = qrSessionToRide(session()).pool!;
-  assert.deepEqual(pool.otherPassengers.map((p) => p.firstName), ['Passenger 1', 'Passenger 3']);
+  assert.deepEqual(pool.otherPassengers, [{ label: 'Passenger 1', number: 1 }, { label: 'Passenger 3', number: 3 }]);
   assert.equal(pool.isShared, true);
   assert.equal(pool.seatsTaken, 3); // 4 seats, 1 free
   assert.equal(pool.seatCapacity, 4);
