@@ -25,11 +25,22 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 
 **On a hosting platform:** add an environment variable named exactly **`JWT_SECRET`**, with a value from the command above, in the platform's environment or secrets settings for the server service. Changing it later signs everyone out (existing tokens stop verifying) and invalidates any password-reset codes that were pending.
 
-## Deploying (Railway for the API, Vercel for the website)
+## Deploying (Fly.io or Railway for the API, Vercel for the website)
 
-The API is an Express server with a **SQLite file and uploaded driver photos on disk**, so it needs a host with a **persistent volume** and one long-running process: **Railway**. The Next.js website has no server-side state and runs on **Vercel**. Deploy the API first (the website needs its address), then the website, then tell the API which website may call it.
+The API is an Express server with a **SQLite file and uploaded driver photos on disk**, so it needs a host with a **persistent volume** and one long-running process: **Fly.io** (steps 1a, `server/fly.toml`) or **Railway** (steps 1b, `server/railway.json`). The Next.js website has no server-side state and runs on **Vercel** (free). Deploy the API first (the website needs its address), then the website, then tell the API which website may call it.
 
-**1. The API on Railway**
+**1a. The API on Fly.io** (install the `flyctl` command-line tool and run `fly auth login` first; a card is required)
+1. From the `server` folder, edit the `app` name in `server/fly.toml` (Fly app names are unique across all users, e.g. `yourname-tesla-pool-api`) and check the region (`sin` Singapore; `bom` Mumbai is also close).
+2. Create the app without deploying: `fly launch --copy-config --no-deploy` (answer **No** to any offer of a database, and keep the existing `fly.toml`).
+3. Create the volume that holds the database and the photos: `fly volumes create data --size 1 --region sin`. Use the same region as in `fly.toml`.
+4. Set the secrets (they are never written in a file): `fly secrets set JWT_SECRET="$(openssl rand -base64 32)"`. Add `CORS_ORIGIN` after the website exists (below).
+5. Deploy **one** machine: `fly deploy --ha=false`. (One machine because SQLite is a single file on one volume; do not scale the API out.) The tables are created and upgraded automatically at start.
+6. The API's address is `https://<app-name>.fly.dev`. Open `https://<app-name>.fly.dev/health`: it answers `{"status":"ok",...}` when the API is up. `fly logs` shows the server's output.
+7. Optional demo data: `fly ssh console`, then `npm run seed` once (it creates the demo accounts, password `password123`, so skip it for anything that is not a demo).
+
+The settings in `fly.toml` are `NODE_ENV=production`, `PORT=3001` and `DB_STORAGE_PATH=/app/data/database.sqlite` (on the volume). It keeps the one machine running (no cold start), which is what costs a few dollars a month; check Fly's current pricing.
+
+**1b. The API on Railway** (the alternative to 1a; the Vercel steps below are the same)
 1. In Railway, **New Project → Deploy from GitHub repo** and pick this repository. Open the service's **Settings** and set **Root Directory** to `server`. Railway reads `server/railway.json` (it builds `server/Dockerfile`, checks `GET /health`, restarts on failure, and keeps **one** replica, because SQLite is a single-writer file).
 2. **Add a Volume** to the service and mount it at `/app/data`. The database (`database.sqlite`) and the uploaded photos live there and survive redeploys. Without the volume the data is lost on every deploy.
 3. In **Variables** add the settings below. `PORT` is set by Railway itself.
@@ -41,18 +52,18 @@ The API is an Express server with a **SQLite file and uploaded driver photos on 
 | `JWT_SECRET` | **required**: from `openssl rand -base64 32`. The server refuses to start without it. |
 | `NODE_ENV` | `production` |
 | `DB_STORAGE_PATH` | `/app/data/database.sqlite` (on the volume) |
-| `CORS_ORIGIN` | the website's address, e.g. `https://tesla-pool.vercel.app` (add it after step 2 below; several addresses can be separated by commas) |
+| `CORS_ORIGIN` | the website's address, e.g. `https://tesla-pool.vercel.app` (add it after step 2 below; several addresses can be separated by commas). On Fly: `fly secrets set CORS_ORIGIN=https://tesla-pool.vercel.app` |
 
 **2. The website on Vercel**
 1. In Vercel, **Add New → Project**, import the same repository, and set **Root Directory** to `client`. The framework is detected as Next.js; keep the defaults.
-2. Add the environment variable **`NEXT_PUBLIC_API_URL`** = the Railway address from step 1.4, with no trailing slash, for **Production** (and Preview if you use it). It is baked into the site when it is built, so **redeploy after changing it**.
+2. Add the environment variable **`NEXT_PUBLIC_API_URL`** = the API address from step 1a.6 (Fly) or 1b.4 (Railway), with no trailing slash, for **Production** (and Preview if you use it). It is baked into the site when it is built, so **redeploy after changing it**.
 3. Deploy, and open the address Vercel gives you.
-4. Back in Railway, set **`CORS_ORIGIN`** to that Vercel address (and redeploy the API). From then on the API answers browsers only from your website; until it is set, the API allows every website.
+4. Back on the API host, set **`CORS_ORIGIN`** to that Vercel address (Fly: `fly secrets set CORS_ORIGIN=...`, which restarts the machine; Railway: the variable, then redeploy). From then on the API answers browsers only from your website; until it is set, the API allows every website.
 
 **Things to know**
 - **Password reset:** there is no SMS gateway yet (`server/src/utils/sms.ts`), so in production the reset code is **not** returned or delivered. Setting `RESET_CODE_IN_RESPONSE=true` returns it in the response for a demo, which is not safe for real users.
-- **One API instance:** do not scale the API to several replicas: each would have its own SQLite file. Growing beyond one instance means moving to a client/server database (see *What I would change at larger scale* under Concurrency Handling).
-- **Backups:** the volume holds all data. Copy `database.sqlite` off the volume (for example with `railway ssh`) before risky changes; there is no automatic backup.
+- **One API instance:** do not scale the API to several machines or replicas (on Fly, deploy with `--ha=false`): each would have its own SQLite file. Growing beyond one instance means moving to a client/server database (see *What I would change at larger scale* under Concurrency Handling).
+- **Backups:** the volume holds all data. Copy `database.sqlite` off the volume before risky changes (Fly: `fly ssh sftp get /app/data/database.sqlite`; Railway: `railway ssh`); there is no automatic backup, though Fly can snapshot volumes (`fly volumes snapshots list`).
 - **Docker instead:** `docker compose up --build` still runs everything locally. Its client image takes the API address from the build argument `NEXT_PUBLIC_API_URL` (default `http://localhost:3001`).
 
 ## Tesla Pooling
