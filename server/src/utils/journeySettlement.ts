@@ -5,7 +5,8 @@ import { SegmentFare } from './fareCalculator';
 
 /**
  * Settles a passenger's fare at the moment their own journey ends. Call it inside the transaction
- * that ended the ride, AFTER its exit checkpoint (drop-off or cancellation) has been recorded.
+ * that ended the ride, AFTER its exit checkpoint (the drop-off) has been recorded. A passenger who leaves
+ * mid-trip is not settled here: they pay half of their quoted fare (cancellationFare in fareCalculator.ts).
  *
  * Walks the pool's checkpoints from where they boarded to where they got off (priceJourney), stores
  * the result as the ride's final fare and returns the breakdown. `poolDiscount` becomes what pooling

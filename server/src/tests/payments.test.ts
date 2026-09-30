@@ -126,15 +126,15 @@ describe('Simulated payments — cash and TeslaPay wallet', () => {
       expect(ledger[0]).toMatchObject({ rideRequestId: n, type: 'DEBIT', amount: 348, balanceAfter: 652 });
     });
 
-    it('debits the segment fare for the part travelled on CANCELLED_IN_TRANSIT: ৳332', async () => {
+    it('debits half of the quoted fare on CANCELLED_IN_TRANSIT: 420 / 2 = ৳210', async () => {
       const { n } = await nusratWalletRafiqCash();
       const res = await leave(n, nusrat, 'Mohammadpur');
 
       expect(res.status).toBe(200);
-      expect(res.body.fare.fare).toBe(332); // 244.29 alone + 87.86 shared = 332.14
-      expect(res.body.payment).toEqual({ method: 'wallet', status: 'PAID', amount: 332, walletBalance: 668 });
-      expect(await ride(n)).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', paymentStatus: 'PAID', paymentAmount: 332 });
-      expect(await balance(nusrat)).toBe(668);
+      expect(res.body.fare.fare).toBe(210); // she boarded alone and was quoted ৳420: half of it
+      expect(res.body.payment).toEqual({ method: 'wallet', status: 'PAID', amount: 210, walletBalance: 790 });
+      expect(await ride(n)).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', paymentStatus: 'PAID', paymentAmount: 210 });
+      expect(await balance(nusrat)).toBe(790);
     });
 
     it('the debit equals estimatedFare for every wallet ride, whatever the pool did', async () => {
@@ -197,10 +197,10 @@ describe('Simulated payments — cash and TeslaPay wallet', () => {
     it('also fails cleanly when leaving mid-trip', async () => {
       const s = await join(shirin, UTTARA_TO_DHANMONDI, 'wallet');
       await start(s);
-      const res = await leave(s, shirin, 'Mirpur'); // 100 + 180 = ৳280 > ৳120
+      const res = await leave(s, shirin, 'Mirpur'); // half of the ৳420 she was quoted = ৳210 > ৳120
       expect(res.status).toBe(200);
-      expect(res.body.payment).toEqual({ method: 'wallet', status: 'FAILED', amount: 280, walletBalance: 120 });
-      expect(await ride(s)).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', paymentStatus: 'FAILED', paymentAmount: 280 });
+      expect(res.body.payment).toEqual({ method: 'wallet', status: 'FAILED', amount: 210, walletBalance: 120 });
+      expect(await ride(s)).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', paymentStatus: 'FAILED', paymentAmount: 210 });
       expect(await balance(shirin)).toBe(120);
     });
 
@@ -226,11 +226,11 @@ describe('Simulated payments — cash and TeslaPay wallet', () => {
       expect(await WalletTransaction.count({ where: { userId: rafiq.id } })).toBe(0);
     });
 
-    it('a cash passenger with an EMPTY wallet is not affected, and a mid-trip exit owes the part-trip fare', async () => {
+    it('a cash passenger with an EMPTY wallet is not affected, and a mid-trip exit owes half of the quoted fare', async () => {
       await User.update({ walletBalance: 0 }, { where: { id: rafiq.id } });
       const { r } = await nusratWalletRafiqCash();
-      const res = await leave(r, rafiq, 'Mohammadpur'); // Mirpur → Mohammadpur, 2 on board: tripCost 100 + 100 = 200; 200 / 2 + 20 = ৳120
-      expect(res.body.payment).toEqual({ method: 'cash', status: 'CASH_DUE', amount: 120, walletBalance: 0 });
+      const res = await leave(r, rafiq, 'Mohammadpur'); // he was quoted 240 / 2 + 20 = ৳140 when he boarded: half is ৳70
+      expect(res.body.payment).toEqual({ method: 'cash', status: 'CASH_DUE', amount: 70, walletBalance: 0 });
       expect(await balance(rafiq)).toBe(0);
       expect(await WalletTransaction.count()).toBe(0);
     });

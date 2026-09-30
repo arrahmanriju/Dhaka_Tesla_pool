@@ -5,7 +5,7 @@ import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 import { validateTransition, RideStatus, DHAKA_ZONES } from '../models/RideRequest';
 import { isFareFinal, recalculatePoolFares } from '../utils/poolFares';
 import { priceJourney, recordExit } from '../utils/checkpoints';
-import { settleJourney } from '../utils/journeySettlement';
+import { cancellationFare } from '../utils/fareCalculator';
 import { collectPayment } from '../utils/payments';
 import { recordRideEvent, joinedMidTrip } from '../utils/rideEvents';
 
@@ -148,6 +148,8 @@ async function timelineFor(rideIds: string[], passengerId: string) {
 // estimate for a ride that is on board. null before boarding.
 async function billFor(ride: any) {
   if (!['STARTED', 'COMPLETED', 'CANCELLED_IN_TRANSIT'].includes(ride.status)) return null;
+  // Leaving mid-trip is not priced from the checkpoints: it is half of the fare they were quoted
+  if (ride.status === 'CANCELLED_IN_TRANSIT') return cancellationBill(ride.quotedFare, ride.estimatedFare);
   const priced = await priceJourney(ride);
   return priced ? { ...passengerBill(priced, priced.fare, null), final: priced.exited } : null;
 }
@@ -491,6 +493,20 @@ function passengerBill(bill: any | null, fare: number, previousEstimate: number 
   };
 }
 
+// The bill of a passenger who left mid-trip: no stretches, because the fare is not worked out from them. It is
+// half of the fare they were quoted (see cancellationFare in utils/fareCalculator.ts).
+function cancellationBill(quotedFare: number | null, fare: number, previousEstimate: number | null = null) {
+  return {
+    segments: [],
+    soloFare: null,
+    poolDiscount: 0,
+    fare,
+    fullTripEstimate: previousEstimate,
+    final: true,
+    cancellation: { rule: 'HALF_OF_QUOTED_FARE', quotedFare },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // PATCH /passenger/rides/:id/cancel-in-transit   (login required)   body: { cancellationZone }
 //
@@ -500,20 +516,20 @@ function passengerBill(bill: any | null, fare: number, previousEstimate: number 
 //   • cancellationZone is required: the nearest predefined zone where they are dropped off (same
 //     zone list as everywhere else). It must differ from the pickup zone, and from the destination
 //     zone (a passenger who reaches their destination completes the trip instead).
-//   • The fare is settled by the same checkpoint / segment pricing as every other journey: the
-//     cancellation zone becomes a checkpoint (passenger count − 1) and their journey is priced from
-//     where they boarded up to it (settleJourney → segmentFare in utils/fareCalculator.ts). They pay
-//     only for the segments they actually travelled, each split between the passengers on board (plus the driver bonus).
-//     `estimatedFare` becomes that final charge.
+//   • The fare is HALF OF THE FARE THEY WERE QUOTED (cancellationFare in utils/fareCalculator.ts; the
+//     quote is frozen in RideRequest.quotedFare when they board). This is a flat, deliberately
+//     customer-friendly leniency policy: it is NOT pro-rated by distance and NOT the checkpoint walk that
+//     prices a completed ride, so it does not matter how far they got. `estimatedFare` becomes that charge.
+//   • The cancellation zone is still recorded as a checkpoint (passenger count − 1), exactly as before.
 //   • The seat is released at once, so the vehicle is eligible again for the pending-request
 //     filter without a re-match.
 //   • 404 no such ride · 403 someone else's ride · 409 the ride is not STARTED (including COMPLETED).
 //
-// ASSUMPTION — nobody else's fare is settled or rewritten by this. A passenger still on board is not
-// charged extra or refunded because someone left: each journey is priced only from the segments that
-// passenger travelled. Passengers still on board simply continue with one fewer passenger, so their
-// own NEXT segments are split between more passengers (their running estimate is refreshed), while
-// the segments already travelled keep the rate that applied when they were travelled.
+// EVERYONE ELSE is priced as usual, with no special adjustment: a passenger who stays on board is not
+// charged extra or refunded because someone left. Their fare is whatever the segment walk gives from the
+// checkpoints (segmentFare): the stretches after this cancellation checkpoint have one fewer passenger, so
+// they are split between fewer riders (their running estimate is refreshed below), while the stretches
+// already travelled keep the split that applied when they were travelled.
 // ---------------------------------------------------------------------------
 router.patch('/rides/:id/cancel-in-transit', ownPassenger, async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -558,16 +574,19 @@ router.patch('/rides/:id/cancel-in-transit', ownPassenger, async (req: Authentic
       const current: any = await RideRequest.findOne({ where: { id: rideId, passengerId }, transaction: t });
       if (!current || current.status !== 'STARTED') throw new Error('NOT_IN_TRANSIT');
 
+      // Half of the fare they were quoted when they boarded (a ride that started before quotes were stored
+      // falls back to its running estimate). Their pool discount is 0: this is not a pooling price.
+      const previousEstimate: number = current.estimatedFare;
+      const charged = cancellationFare(current.quotedFare ?? current.estimatedFare);
       const [changed] = await RideRequest.update(
-        { status: 'CANCELLED_IN_TRANSIT', cancellationZone: zone },
+        { status: 'CANCELLED_IN_TRANSIT', cancellationZone: zone, estimatedFare: charged, poolDiscount: 0 },
         { where: { id: rideId, passengerId, status: 'STARTED' }, transaction: t }
       );
       if (changed === 0) throw new Error('NOT_IN_TRANSIT');
 
-      // The cancellation zone is a checkpoint (passengers on board - 1); then the journey is priced
-      // from where they boarded to here, segment by segment.
+      // The cancellation zone is still a checkpoint (passengers on board - 1), so the stretches after it are
+      // priced for one fewer passenger.
       await recordExit(current, 'PASSENGER_LEFT', zone, t);
-      const settled = await settleJourney(current, t);
 
       // Release the seat immediately, and refresh the running estimates of whoever is still on board
       if (current.vehicleId) {
@@ -578,23 +597,22 @@ router.patch('/rides/:id/cancel-in-transit', ownPassenger, async (req: Authentic
         await recalculatePoolFares(current.vehicleId, t);
       }
 
-      const charged = settled.bill?.fare ?? current.estimatedFare;
-      // Collect the fare for the part travelled: wallet debit by exactly this amount, or cash owed.
+      // Collect the cancellation fare: wallet debit by exactly this amount, or cash owed.
       await collectPayment(current, charged, t);
       await recordRideEvent(current, 'CANCELLED_IN_TRANSIT', 'STARTED', { id: passengerId, role: 'PASSENGER' }, t, {
         cancellationZone: zone,
         chargedFare: charged,
-        fullTripEstimate: settled.previousEstimate,
+        fullTripEstimate: previousEstimate,
       });
-      return { settled, charged };
+      return { charged, previousEstimate, quotedFare: current.quotedFare ?? null };
     });
 
     res.json({
-      message: 'You left the ride. You will be charged for the part you travelled.',
+      message: 'You left the ride. You will be charged half of the fare you were quoted.',
       rideId,
       status: 'CANCELLED_IN_TRANSIT',
       cancellationZone: zone,
-      fare: passengerBill(result.settled.bill, result.charged, result.settled.previousEstimate),
+      fare: cancellationBill(result.quotedFare, result.charged, result.previousEstimate),
       payment: await paymentOf(rideId, passengerId),
     });
   } catch (error: any) {
