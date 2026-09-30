@@ -6,7 +6,7 @@ import { priceJourney } from './checkpoints';
 
 /**
  * A ride's fare is FINAL only once the passenger's own journey has ended (COMPLETED, or
- * CANCELLED_IN_TRANSIT at a zone they named). Until then `estimatedFare` is an estimate that follows
+ * CANCELLED_IN_TRANSIT, at half their quoted fare). Until then `estimatedFare` is an estimate that follows
  * the pool: there is no lock when the trip starts. See segmentFare() in fareCalculator.ts.
  */
 export const isFareFinal = (status: string): boolean => status === 'COMPLETED' || status === 'CANCELLED_IN_TRANSIT';

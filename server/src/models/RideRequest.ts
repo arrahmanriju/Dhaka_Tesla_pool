@@ -123,7 +123,14 @@ export class RideRequest extends Model {
   /** What this passenger saves by sharing (baseFare − estimatedFare) — whole taka. 0 when riding alone. */
   public poolDiscount!: number;
 
-  /** Where the passenger left the ride, when it ended CANCELLED_IN_TRANSIT. `estimatedFare` is then the pro-rated charge. */
+  /**
+   * The pooled fare for the passenger's whole route that they were quoted when they boarded (whole taka),
+   * frozen at that moment: null until the ride STARTS. It is what a mid-trip cancellation is based on
+   * (half of it, see cancellationFare in utils/fareCalculator.ts). `estimatedFare` keeps following the pool.
+   */
+  public quotedFare!: number | null;
+
+  /** Where the passenger left the ride, when it ended CANCELLED_IN_TRANSIT. `estimatedFare` is then half of `quotedFare`. */
   public cancellationZone!: string | null;
 
   /** How the passenger pays: 'cash' (to the driver) or 'wallet' (TeslaPay). Chosen when the ride is requested. */
@@ -196,6 +203,11 @@ export const initRideRequest = (sequelize: any) => {
         allowNull: false,
         defaultValue: 0,
         validate: { isInt: true },
+      },
+      quotedFare: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        validate: { isInt: true, min: 0 },
       },
       cancellationZone: {
         type: DataTypes.ENUM(...DHAKA_ZONES),

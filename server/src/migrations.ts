@@ -163,7 +163,7 @@ export async function migrateFaresToTaka(): Promise<void> {
 
 /**
  * Idempotent: adds the columns behind mid-trip cancellation to a database created before it existed:
- * `RideRequests.cancellationZone` and `RideEvents.cancellationZone / chargedFare / fullTripEstimate`.
+ * `RideRequests.cancellationZone / quotedFare` and `RideEvents.cancellationZone / chargedFare / fullTripEstimate`.
  * `sequelize.sync()` never adds columns to an existing table. (The status column is plain TEXT in
  * SQLite, so the new CANCELLED_IN_TRANSIT value needs no change.)
  */
@@ -181,6 +181,7 @@ export async function migrateMidTripCancellation(): Promise<void> {
     else await sequelize.query(`ALTER TABLE \`${table}\` RENAME COLUMN \`${from}\` TO \`${to}\``);
   };
   await add('RideRequests', 'cancellationZone', 'TEXT');
+  await add('RideRequests', 'quotedFare', 'INTEGER');
   await add('RideEvents', 'cancellationZone', 'VARCHAR(255)');
   await add('RideEvents', 'chargedFare', 'INTEGER');
   await renameColumn('RideEvents', 'lockedFare', 'fullTripEstimate'); // an early version of this feature named it lockedFare

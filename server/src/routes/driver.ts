@@ -104,7 +104,15 @@ async function advanceRide(
   }
 
   await sequelize.transaction({ type: Transaction.TYPES.IMMEDIATE }, async (t: any) => {
-    await RideRequest.update({ status: targetStatus }, { where: { id: rideId }, transaction: t });
+    await RideRequest.update(
+      {
+        status: targetStatus,
+        // The passenger boards: the pooled fare they were quoted for their whole route is frozen here. It is what a
+        // mid-trip cancellation is based on (half of it); `estimatedFare` goes on following the pool.
+        ...(targetStatus === 'STARTED' ? { quotedFare: ride.estimatedFare } : {}),
+      },
+      { where: { id: rideId }, transaction: t }
+    );
     await recordRideEvent(ride, targetStatus, ride.status, { id: driverId, role: 'DRIVER' }, t);
 
     if (targetStatus === 'STARTED') {

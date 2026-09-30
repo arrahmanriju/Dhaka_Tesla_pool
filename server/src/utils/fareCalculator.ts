@@ -91,9 +91,10 @@ export function calculateBaseFare(pickup: string, dropoff: string, seatCount: nu
 //   segment, and a passenger who rode alone would no longer pay exactly their trip cost.) The ৳20 bonus
 //   is a whole number, so only the split part is ever rounded. All arithmetic is on integers.
 //
-// The passenger's own exit (drop-off at their destination, or a mid-trip cancellation at a zone they
-// name) is a checkpoint like any other, so a cancellation is not a special case: the journey simply
-// ends at that checkpoint and the same walk prices it.
+// The passenger's own exit is a checkpoint like any other, and a mid-trip cancellation at a zone they
+// name is one too: it lowers the count on board for everyone after it, so the people who stay are priced
+// by this same walk. The person who LEAVES is the one exception: they pay half their quoted fare
+// (cancellationFare below), not a walked fare.
 //
 // Distances come from the zone table above. Two checkpoints in the same zone are 0 km apart (no
 // charge). A journey of 0 km in total costs the ৳100 base.
@@ -153,8 +154,10 @@ export function segmentFare(input: {
   exitZone?: string;
   seatCount: number;
   allowSharing?: boolean;
+  /** Distance between two zones in km. Defaults to the zone table; a "what if" network can be passed instead. */
+  distanceKm?: (from: string, to: string) => number;
 }): SegmentFare {
-  const { points, exitZone, seatCount, allowSharing = true } = input;
+  const { points, exitZone, seatCount, allowSharing = true, distanceKm = segmentDistanceKm } = input;
   if (points.length === 0) throw new Error('A journey needs at least its boarding checkpoint');
 
   const legs: { from: FarePoint; toZone: string }[] = [];
@@ -164,7 +167,7 @@ export function segmentFare(input: {
   const raw = legs.map(({ from, toZone }) => ({
     fromZone: from.zone,
     toZone,
-    distanceKm: segmentDistanceKm(from.zone, toZone),
+    distanceKm: distanceKm(from.zone, toZone),
     passengers: allowSharing ? Math.max(1, Math.floor(from.passengerCount)) : 1,
   }));
 
@@ -200,6 +203,26 @@ export function segmentFare(input: {
   if (!Number.isSafeInteger(2 * cumulative + D)) throw new Error('Fare arithmetic overflow');
   const fare = roundedBefore;
   return { segments, soloFare, fare, poolDiscount: Math.max(0, soloFare - fare) };
+}
+
+/**
+ * THE FARE OF A PASSENGER WHO LEAVES MID-TRIP (CANCELLED_IN_TRANSIT): half of the fare they were quoted.
+ *
+ *   cancellationFare = quotedFare / 2        (nearest whole taka, halves up: 113 / 2 = 56.5 → ৳57)
+ *
+ * This is a deliberate, customer-friendly LENIENCY POLICY, not a price. It is NOT pro-rated by distance
+ * and it does NOT walk the checkpoints like a completed ride does (see segmentFare above): however far
+ * they travelled before getting off, they pay half of what they were quoted. `quotedFare` is the pooled
+ * fare for their whole route that they were shown when they boarded (RideRequest.quotedFare), before
+ * anything changed mid-trip.
+ *
+ * Only the person who leaves is priced this way. Everyone who stays on board is priced by the ordinary
+ * segment walk, with no adjustment for the cancellation: it only shows up as a checkpoint where the
+ * number of passengers on board drops by one.
+ */
+export function cancellationFare(quotedFare: number): number {
+  if (!Number.isSafeInteger(quotedFare) || quotedFare < 0) throw new Error('A quoted fare is a whole number of taka');
+  return Math.floor((quotedFare + 1) / 2); // quotedFare / 2, halves up, in integers
 }
 
 /**
