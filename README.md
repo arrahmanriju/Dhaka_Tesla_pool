@@ -8,11 +8,11 @@ A `REQUESTED` ride is offered to a driver, and can be accepted onto their vehicl
 1. **Seats** — the requested `seatCount` is at most the vehicle's free seats (`seatCapacity - occupiedSeats`).
 2. **Not declined** — this driver has not declined the request.
 3. **Private rides** — a private request (sharing off) needs a vehicle with no other passenger, and a vehicle carrying a private ride takes nobody.
-4. **Route** — the request's route is compatible (below) with **every** ride already on the vehicle. The rides that count are those in `MATCHED`, `DRIVER_ARRIVED` **and `STARTED`**: a trip that is already under way still takes passengers (see *Mid-trip pooling*). An empty vehicle accepts any route.
+4. **Route** — the request fits the rides already on the vehicle (`MATCHED`, `DRIVER_ARRIVED`, `STARTED`), using **Rule A** for rides that have not started and the stricter **Rule B** if any ride is `STARTED` (a trip under way still takes passengers, see *Mid-trip pooling*). An empty vehicle accepts any route.
 
-The list the driver sees (`GET /ride-requests/pending`) and the accept route (`POST /ride-requests/:id/accept`) use the same function (`checkPoolJoin` in `server/src/utils/pooling.ts`), so they cannot disagree.
+A request that fails any of these is **filtered out**: it is not in `GET /ride-requests/pending` (so it never shows in the Pending Requests tab or the mid-trip "Riders along your route" panel) and `POST /ride-requests/:id/accept` refuses it with 409. Both use the same function (`checkPoolJoin` in `server/src/utils/pooling.ts`), so they cannot disagree.
 
-#### Route compatibility — the exact rule
+#### The zone grid
 No map service is used. Every zone has a fixed point on a grid (`x` grows east, `y` grows north, **1 unit ≈ 0.5 km**; `ZONE_COORDS` in `server/src/utils/routeDirection.ts`). Fares still use the distance table in `fareCalculator.ts`; the grid is only for direction.
 
 | Zone | (x, y) | Zone | (x, y) |
@@ -23,34 +23,57 @@ No map service is used. Every zone has a fixed point on a grid (`x` grows east, 
 | Dhanmondi | (5, 4) | Gulshan 1 | (14, 11) |
 | Motijheel | (14, 1) | Badda | (15, 11) |
 
-Take a route already in the pool, **A → B**, and a new request **C → D**. Let `u = B − A`, `v = D − C`, `w = C − A`, and write `u·v = ux·vx + uy·vy` (dot product), `u×w = ux·wy − uy·wx` (cross product), `|u|² = u·u`. The request is compatible with that route when **all four** hold:
+Notation: `u·v = ux·vx + uy·vy` (dot product), `u×w = ux·wy − uy·wx` (cross product), `|u|² = u·u`. **"Same direction"** always means the angle between two routes is at most 45°: `u·v > 0` **and** `2·(u·v)² ≥ |u|²·|v|²`. **"Within d units of the line"** for a road with direction `u` and a point at offset `w` from its start means `(u×w)² ≤ d²·|u|²`.
 
-1. **Same direction (at most 45° apart)** — `u·v > 0` **and** `2·(u·v)² ≥ |u|²·|v|²`
-2. **Pickup inside the corridor** — `C` is at most 4 units (2 km) from the line through A and B: `(u×w)² ≤ 16·|u|²`
-3. **The trips overlap** — measured along the road, C is before B and D is after A: `u·w < |u|²` **and** `u·(D − A) > 0`
-4. **Not behind a started trip** — only if the route in the pool has `STARTED`: `u·w ≥ 0`. The car has already left A and cannot go back for someone behind it. (There is no live GPS, so "at or past the start of the started trip" is the closest safe test.)
+#### Rule A — rides that have not started
+For a route already in the pool, **A → B**, and a new request **C → D** (`u = B − A`, `v = D − C`, `w = C − A`), all three must hold, against **every** such ride:
+1. **Same direction** — angle between `u` and `v` at most 45°.
+2. **Pickup in the corridor** — `C` within 4 units (2 km) of the line through A and B: `(u×w)² ≤ 16·|u|²`.
+3. **The trips overlap** — `u·w < |u|²` **and** `u·(D − A) > 0` (C is before B, D is after A).
 
-An identical route always passes. The thresholds are the constants `MAX_ANGLE_DEGREES` (45, applied as the `2·dot² ≥ |u|²|v|²` form) and `CORRIDOR_UNITS` (4).
+An identical route always passes. Before any trip starts, **Gulshan → Banani** and **Gulshan → Dhanmondi** do not pool (`u = (−1,0)`, `v = (−8,−10)`, `2·64 = 128 < 164`), while **Mohakhali → Badda** and **Mohakhali → Gulshan 1** do.
 
-**Worked examples** — Nusrat's trip is **Mohakhali (11,11) → Badda (15,11)**, already `STARTED`: `u = (4,0)`, `|u|² = 16`.
+#### Rule B — a trip under way (at least one ride is `STARTED`)
+There is no live GPS, so the vehicle's road is worked out from the passengers on board (the `STARTED` rides):
 
-| New request | v | Rule 1 (direction) | Rules 2–4 | Result |
-|---|---|---|---|---|
-| Mohakhali → Gulshan 1 | (3,0) | `u·v = 12`; `2·144 = 288 ≥ 16·9 = 144` ✓ | `w = (0,0)`: `u×w = 0`, `u·w = 0 < 16`, `u·(D−A) = 12 > 0` ✓ | **compatible** (shorter, same way) |
-| Mohakhali → Badda | (4,0) | `u·v = 16`; `2·256 = 512 ≥ 256` ✓ | `w = 0` ✓ | **compatible** (identical) |
-| Gulshan 1 → Badda | (1,0) | `u·v = 4`; `32 ≥ 16` ✓ | `w = (3,0)`: `u×w = 0`, `u·w = 12 < 16`, `u·(D−A) = 16 > 0`, `12 ≥ 0` ✓ | **compatible** (picked up part-way) |
-| Banani → Gulshan | (1,0) | `u·v = 4`; `32 ≥ 16` ✓ | `w = (1,3)`: `u×w = 12`, `144 ≤ 16·16 = 256` ✓; `u·w = 4 < 16`; `u·(D−A) = 8 > 0` ✓ | **compatible** (parallel road, 1.5 km off) |
-| Mohakhali → Gulshan | (2,3) | `u·v = 8`; `2·64 = 128 < 16·13 = 208` ✗ (56°) | — | rejected: direction |
-| Mohakhali → Dhanmondi | (−6,−7) | `u·v = −24 < 0` ✗ | — | rejected: opposite way |
-| Mohakhali → Uttara / Motijheel | (−5,21) / (3,−10) | ✗ | — | rejected: direction |
-| Badda → Mohakhali | (−4,0) | `u·v < 0` ✗ | — | rejected: reverse trip |
+- **P, the current position** = the pickup zone of the **most recently started** onboard ride. The car has at least reached the last place it picked someone up. (Order comes from the `STARTED` event in the lifecycle history.)
+- **F, the final destination** = the destination of an onboard ride that is **farthest from P** (squared grid distance; the first wins a tie).
+- `u = F − P` is the road still ahead. For a request **C → D**: `v = D − C`, `w = C − P`.
 
-Two more, for the other rules: with **Mohakhali → Gulshan 1** in the pool (`u = (3,0)`, `|u|² = 9`), a request **Gulshan 1 → Badda** has `w = (3,0)`, `u·w = 9 = |u|²`, so rule 3 fails (that passenger would be dropped off before this one is picked up). And with a **started Gulshan 1 → Badda** trip (`u = (1,0)`), a request **Mohakhali → Badda** has `w = (−3,0)`, `u·w = −3 < 0`: rule 4 rejects it (it would pass if that trip had not started). Before any trip starts, **Gulshan → Banani** and **Gulshan → Dhanmondi** still do not pool (`u = (−1,0)`, `v = (−8,−10)`, `2·64 = 128 < 164`).
+A request is offered only if **both (a) and (b)** hold:
+
+**(a) The pickup is on the road ahead, with no significant detour**
+- a1. not behind the car: `u·w ≥ 0`
+- a2. not at or past the end: `u·w < |u|²`
+- a3. at most 2 units (**1 km**) from the line P → F: `(u×w)² ≤ 4·|u|²`
+
+**(b) The destination continues the same way as the passengers on board**
+- b1. same direction (≤ 45°) as **every** onboard passenger's own route (their pickup → destination)
+- b2. within 4 units (**2 km**) of the line P → F, whether before F or beyond it: `(u×(D − P))² ≤ 16·|u|²`
+
+The constants are `ONBOARD_PICKUP_CORRIDOR_UNITS` (2), `ONBOARD_DESTINATION_CORRIDOR_UNITS` (4) and `CORRIDOR_UNITS` (4, Rule A); the 45° is built into the `2·dot² ≥ |u|²|v|²` form. Rides in `MATCHED` / `DRIVER_ARRIVED` on the same vehicle are additionally checked with Rule A.
+
+**Worked examples for Rule B** — Nusrat (Mohakhali → Badda) is `STARTED` alone: `P = (11,11)`, `F = (15,11)`, `u = (4,0)`, `|u|² = 16`.
+
+| New request | Check | Result |
+|---|---|---|
+| Mohakhali → Gulshan 1 | `v = (3,0)`: `u·v = 12`, `288 ≥ 144` ✓. `w = (0,0)`: `0 ≤ 0 < 16` ✓, offset 0 ✓. `D−P = (3,0)`: offset 0 ✓ | **shown** (shorter, same way) |
+| Mohakhali → Badda | identical | **shown** |
+| Gulshan 1 → Badda | `v = (1,0)` ✓. `w = (3,0)`: `u·w = 12`, `0 ≤ 12 < 16` ✓, offset 0 ✓ | **shown** (picked up part-way) |
+| Banani → Gulshan | `v = (1,0)` ✓. `w = (1,3)`: `u·w = 4` ✓ but `u×w = 12`, `144 > 4·16 = 64` ✗ (1.5 km off) | hidden: detour (it *is* allowed before the trip starts, Rule A) |
+| Mohakhali → Gulshan | `v = (2,3)`: `u·v = 8`, `128 < 16·13 = 208` ✗ (56°) | hidden: direction |
+| Mohakhali → Dhanmondi | `v = (−6,−7)`: `u·v = −24 < 0` ✗ | hidden: opposite way |
+| Badda → Gulshan 1 | `v = (−1,0)`: `u·v < 0` ✗ | hidden: reverse |
+
+More cases (for the other checks):
+- **Behind the car (a1):** Rafiq boards at Gulshan 1 and his ride starts. Now `P = (14,11)`, `F = (15,11)`, `u = (1,0)`. **Mohakhali → Badda** has `w = (−3,0)`, `u·w = −3 < 0` → hidden. **Gulshan 1 → Badda** (`w = 0`) is still shown.
+- **Past the end (a2):** only Rafiq (Mohakhali → Gulshan 1) is on board, `u = (3,0)`, `|u|² = 9`. **Gulshan 1 → Badda** has `w = (3,0)`, `u·w = 9 = |u|²` → hidden (he is dropped off where this rider would be picked up).
+- **Destination drifts (b2):** Nusrat rides **Mohakhali → Banani**: `P = (11,11)`, `u = (1,3)`, `|u|² = 10`. **Mohakhali → Uttara** has `v = (−5,21)`, `u·v = 58`, `2·3364 = 6728 ≥ 10·466 = 4660` (within 45° ✓), but `u×(D−P) = 1·21 − 3·(−5) = 36`, `1296 > 16·10 = 160` → hidden: it leaves the road even though it starts on it.
 
 ### Mid-trip pooling
 A ride that is `STARTED` keeps taking passengers, as long as their route is compatible and a seat is free.
 
-1. Nusrat's ride starts (alone, fare locked at ৳180). Rafiq then requests Mohakhali → Gulshan 1.
+1. Nusrat's ride starts (alone, fare locked at ৳180). Rafiq then requests Mohakhali → Gulshan 1. Only requests that pass Rule B are listed: the rest never reach the driver.
 2. While any of the driver's rides is `STARTED`, the driver's **Active** tab shows **Riders along your route** and re-reads `GET /ride-requests/pending` every **12 seconds** (plain polling, no websockets; it pauses while the browser tab is hidden). The response also carries `midTrip` (a ride is under way) and `availableSeats`, and each request carries `joinsMidTrip`.
 3. The driver taps **Add to trip** (`POST /ride-requests/:id/accept`, the same route as before the trip) or **Decline** (`POST /ride-requests/:id/decline`, driver login required: the request stays open for other drivers and never shows to this driver again).
 4. The new passenger becomes `MATCHED` and has their **own** lifecycle: `DRIVER_ARRIVED` → `STARTED` → `COMPLETED`, independent of Nusrat. When someone completes, their seat is freed and the next compatible request can take it.
