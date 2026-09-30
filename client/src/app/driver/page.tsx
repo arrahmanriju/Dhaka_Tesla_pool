@@ -4,6 +4,8 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { AppNav } from '@/components/AppNav';
 import { StatusBadge } from '@/components/StatusBadge';
+import { MidTripOffers } from '@/components/MidTripOffers';
+import { PoolTimeline } from '@/components/PoolTimeline';
 import { LoadingScreen, EmptyState, ErrorBanner, SuccessBanner, Spinner, SeatCount } from '@/components/UI';
 import { driverApi, ApiError, type Ride, type Vehicle } from '@/lib/api';
 import { getUser } from '@/lib/auth';
@@ -292,6 +294,10 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
   // Only show EmptyState if load succeeded (no error). If there's an error,
   // the ErrorBanner above already tells the user what went wrong.
   const showEmpty = !error && rides.length === 0;
+  // While any passenger is travelling, the driver is offered compatible requests to add mid-trip.
+  const tripStarted = rides.some((r) => r.status === 'STARTED');
+  // Re-read the pool history whenever a ride's status changes
+  const historyKey = rides.map((r) => `${r.id}:${r.status}`).join(',');
 
   return (
     <div className="animate-in">
@@ -326,6 +332,7 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
             </div>
             <p className="earnings-card__note">{t('d.active.earningsNote')}</p>
           </div>
+          {tripStarted && <MidTripOffers driverId={driverId} onJoined={() => load(true)} />}
           {rides.map((ride) => (
             <ActiveDriverRideCard
               key={ride.id}
@@ -334,6 +341,7 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
               actionLoading={actionLoading}
             />
           ))}
+          <PoolTimeline refreshKey={historyKey} />
         </div>
       ) : null}
     </div>

@@ -183,8 +183,26 @@ export interface Ride {
   /** True when 2+ passengers share this vehicle */
   isSharedRide?: boolean;
   poolDiscountApplied?: boolean;
+  /** Set on the driver's pending list: the trip is already under way, so accepting adds them mid-trip */
+  joinsMidTrip?: boolean;
+  /** This passenger's own history (passenger endpoints only) */
+  timeline?: { status: RideStatus; at: string; ridersOnboard?: number; joinedMidTrip?: boolean }[];
+  /** true when this passenger was matched while another passenger was already travelling */
+  joinedMidTrip?: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+/** One step in the driver's pool history. Passengers appear by first name only. */
+export interface PoolEvent {
+  id: number;
+  rideId: string;
+  passengerFirstName: string;
+  status: RideStatus;
+  at: string;
+  poolSize: number;
+  ridersOnboard: number;
+  joinedMidTrip: boolean;
 }
 
 export interface Vehicle {
@@ -287,14 +305,14 @@ export const driverApi = {
   // The backend answers 404 when the driver has no active vehicle yet. That is a normal
   // state for a new driver, not a failure, so it is reported as `noVehicle` instead.
   getPendingRides: (driverId: string) =>
-    request<{ requests: Ride[] }>(`/ride-requests/pending?driverId=${driverId}`)
-      .then(r => ({ noVehicle: false, rides: r.requests.map((req: any) => ({
+    request<{ requests: Ride[]; midTrip?: boolean; availableSeats?: number }>(`/ride-requests/pending?driverId=${driverId}`)
+      .then(r => ({ noVehicle: false, midTrip: !!r.midTrip, availableSeats: r.availableSeats ?? 0, rides: r.requests.map((req: any) => ({
         ...req,
         createdAt: req.createdAt ?? new Date().toISOString(),
         updatedAt: req.updatedAt ?? new Date().toISOString(),
       }))}))
       .catch(err => {
-        if (err instanceof ApiError && err.status === 404) return { noVehicle: true, rides: [] as Ride[] };
+        if (err instanceof ApiError && err.status === 404) return { noVehicle: true, midTrip: false, availableSeats: 0, rides: [] as Ride[] };
         throw err;
       }),
 
@@ -303,6 +321,13 @@ export const driverApi = {
       method: 'POST',
       body: JSON.stringify({ driverId }),
     }),
+
+  /** Dismisses a pending request for this driver only; it stays open for other drivers. */
+  declineRide: (rideId: string) =>
+    request<{ message: string; rideId: string }>(`/ride-requests/${rideId}/decline`, { method: 'POST', body: JSON.stringify({}) }),
+
+  /** Who joined the pool and when (latest 200 events, oldest first). */
+  getTimeline: () => request<{ events: PoolEvent[] }>('/driver/rides/timeline'),
 
   // Backend: GET /driver/rides/active?driverId=...
   // `totalEarnings` is the whole taka the passengers in this pool pay (what the driver earns).

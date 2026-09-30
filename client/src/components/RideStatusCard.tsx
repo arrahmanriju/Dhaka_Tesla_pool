@@ -171,6 +171,9 @@ export function RideStatusCard({
           <div className="ride-block__line" id="pool-seats">
             {t('rs.seatsTaken', { taken: pool.seatsTaken, capacity: pool.seatCapacity })}
           </div>
+          {ride.joinedMidTrip && (
+            <div className="ride-block__line" id="pool-joined-mid-trip">{t('rs.joinedMidTrip')}</div>
+          )}
           {pool.otherPassengers.length > 0 && (
             <div className="ride-block__line" id="pool-others">
               {t('rs.ridingWith')}: <strong>{pool.otherPassengers.map((p) => p.firstName).join(', ')}</strong>
