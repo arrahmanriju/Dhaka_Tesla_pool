@@ -1,0 +1,11 @@
+# Keep these out of the Docker build context
+.git
+**/node_modules
+**/.env*
+
+# Build output
+**/dist
+**/.next
+**/out
+**/build
+**/coverage
