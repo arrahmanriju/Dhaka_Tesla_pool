@@ -112,6 +112,7 @@ async function enrichRide(ride: any) {
     pickupZone: ride.pickupZone,
     destinationZone: ride.destinationZone,
     seatCount: ride.seatCount,
+    allowSharing: ride.allowSharing,
     baseFare: ride.baseFare,
     estimatedFare: ride.estimatedFare,
     estimatedFareBDT: (ride.estimatedFare / 100).toFixed(2),

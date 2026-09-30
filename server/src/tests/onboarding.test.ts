@@ -4,6 +4,7 @@ import path from 'path';
 import { app } from '../index';
 import { sequelize, storagePath, User, Vehicle, RideRequest, DriverProfile } from '../models';
 import { UPLOADS_DIR } from '../utils/onboarding';
+import { asUser } from './helpers';
 
 const uploadsDir = UPLOADS_DIR(storagePath);
 const uploadCount = () => (fs.existsSync(uploadsDir) ? fs.readdirSync(uploadsDir).length : 0);
@@ -366,8 +367,7 @@ describe('Driver onboarding', () => {
       await onboard(driver.token, form({ nid: NID }));
 
       const created = await request(app)
-        .post('/ride-requests')
-        .send({ passengerId: passenger.id, pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1 });
+        .post('/ride-requests').set(asUser(passenger.id)).send({ pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1 });
       expect(created.status).toBe(201);
       const rideId = created.body.rideRequest.id;
       const accepted = await request(app).post(`/ride-requests/${rideId}/accept`).send({ driverId: driver.id });

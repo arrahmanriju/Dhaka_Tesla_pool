@@ -9,9 +9,18 @@ export const DHAKA_ZONES = [
   'Motijheel',
   'Mohammadpur',
   'Badda',
+  'Mohakhali',
+  'Gulshan 1',
 ] as const;
 
 export type DhakaZone = typeof DHAKA_ZONES[number];
+
+/** A single ride request can book 1–3 seats (the largest Tesla in the fleet has 3). */
+export const MIN_SEATS_PER_RIDE = 1;
+export const MAX_SEATS_PER_RIDE = 3;
+
+/** Statuses that count as "the passenger has a ride in progress" (everything but the terminal states). */
+export const ACTIVE_RIDE_STATUSES = ['REQUESTED', 'MATCHED', 'DRIVER_ARRIVED', 'STARTED'] as const;
 
 // ---------------------------------------------------------------------------
 // Pool compatibility: two requests are pool-compatible if they share the same
@@ -100,6 +109,9 @@ export class RideRequest extends Model {
   public destinationZone!: string;
   public seatCount!: number;
 
+  /** false = private ride: never pooled with other passengers. */
+  public allowSharing!: boolean;
+
   /** Full fare before pool discount — integer paisa. Set at creation; never changes. */
   public baseFare!: number;
 
@@ -154,6 +166,11 @@ export const initRideRequest = (sequelize: any) => {
         type: DataTypes.INTEGER,
         allowNull: false,
         validate: { min: 1 },
+      },
+      allowSharing: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: true,
       },
       baseFare: {
         type: DataTypes.INTEGER, // paisa — set at creation, never changes

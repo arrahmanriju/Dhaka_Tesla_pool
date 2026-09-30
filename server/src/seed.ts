@@ -1,5 +1,6 @@
 import bcrypt from 'bcryptjs';
 import { sequelize, User, Vehicle, DriverProfile } from './models';
+import { ensureOneActiveRideIndex } from './migrations';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -9,7 +10,8 @@ async function seed() {
     console.log('Syncing database...');
     // Force true drops the tables if they exist, resetting the DB state for testing
     await sequelize.sync({ force: true });
-    
+    await ensureOneActiveRideIndex();
+
     console.log('Database synced. Seeding data...');
 
     const defaultPassword = await bcrypt.hash('password123', 10);

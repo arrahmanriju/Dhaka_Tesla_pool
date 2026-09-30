@@ -4,7 +4,7 @@ import { useRouter } from 'next/navigation';
 import { AppNav } from '@/components/AppNav';
 import { StatusBadge, StatusTimeline } from '@/components/StatusBadge';
 import { LoadingScreen, EmptyState, ErrorBanner, SuccessBanner, SeatCount } from '@/components/UI';
-import { passengerApi, DHAKA_ZONES, type Ride, ApiError } from '@/lib/api';
+import { passengerApi, type FareEstimate, type Ride, type User, ApiError } from '@/lib/api';
 import { getUser } from '@/lib/auth';
 import { usePreferences } from '@/lib/preferences';
 
@@ -15,6 +15,8 @@ export default function PassengerDashboard() {
   const { t } = usePreferences();
   const [user, setUser] = useState<ReturnType<typeof getUser>>(null);
   const [tab, setTab] = useState<Tab>('active');
+  // Shown on the status tab right after a ride is requested.
+  const [justRequested, setJustRequested] = useState(false);
 
   useEffect(() => {
     const u = getUser();
@@ -43,7 +45,7 @@ export default function PassengerDashboard() {
               key={t.id}
               id={`tab-${t.id}`}
               className={`tab-nav__item${tab === t.id ? ' tab-nav__item--active' : ''}`}
-              onClick={() => setTab(t.id)}
+              onClick={() => { setJustRequested(false); setTab(t.id); }}
             >
               {t.label}
             </button>
@@ -52,8 +54,16 @@ export default function PassengerDashboard() {
       </div>
 
       <div className="dashboard__body">
-        {tab === 'request'  && <RequestRideTab  passengerId={user.id} />}
-        {tab === 'active'   && <ActiveRidesTab  passengerId={user.id} onNavigate={setTab} />}
+        {tab === 'request'  && (
+          <RequestRideTab
+            user={user}
+            onCreated={() => { setJustRequested(true); setTab('active'); }}
+            onViewActive={() => setTab('active')}
+          />
+        )}
+        {tab === 'active'   && (
+          <ActiveRidesTab passengerId={user.id} onNavigate={setTab} justRequested={justRequested} />
+        )}
         {tab === 'history'  && <HistoryTab      passengerId={user.id} />}
       </div>
     </div>
@@ -61,58 +71,90 @@ export default function PassengerDashboard() {
 }
 
 // ─── Request Ride Tab ──────────────────────────────────────────────────────
-function RequestRideTab({ passengerId }: { passengerId: string }) {
+// Name and phone come from the logged-in account, so the form only asks for the trip itself.
+// The fare preview is computed by the server (same formula as the stored fare) and refreshed
+// whenever the form changes.
+function RequestRideTab({
+  user,
+  onCreated,
+  onViewActive,
+}: {
+  user: User;
+  onCreated: () => void;
+  onViewActive: () => void;
+}) {
   const { t, tp, tz } = usePreferences();
+  const [zones, setZones] = useState<string[]>([]);
+  const [maxSeats, setMaxSeats] = useState(3);
   const [pickup, setPickup] = useState('');
   const [destination, setDestination] = useState('');
   const [seats, setSeats] = useState(1);
+  const [allowSharing, setAllowSharing] = useState(true);
+  // Each estimate is stored with the form values it was computed for, so an answer for
+  // an older form state is simply ignored (and "calculating" is derived, not stored).
+  const [result, setResult] = useState<{ key: string; estimate: FareEstimate | null } | null>(null);
+  const [hasActiveRide, setHasActiveRide] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [success, setSuccess] = useState<Ride | null>(null);
+
+  // Zone list (from the server) and whether the passenger already has a ride in progress.
+  useEffect(() => {
+    passengerApi.getRideOptions()
+      .then((o) => { setZones(o.zones); setMaxSeats(o.maxSeats); })
+      .catch(() => setError(t('p.req.zonesError')));
+    passengerApi.getActiveRides(user.id)
+      .then((r) => setHasActiveRide(r.rides.length > 0))
+      .catch(() => { /* the server enforces the rule either way */ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user.id]);
+
+  // Live fare estimate, refreshed (debounced) whenever the form changes.
+  const canEstimate = !!pickup && !!destination && pickup !== destination;
+  const key = `${pickup}|${destination}|${seats}|${allowSharing}`;
+  useEffect(() => {
+    if (!canEstimate) return;
+    let stale = false;
+    const timer = setTimeout(() => {
+      passengerApi.estimateFare({ pickupZone: pickup, destinationZone: destination, seatCount: seats, allowSharing })
+        .then((estimate) => { if (!stale) setResult({ key, estimate }); })
+        .catch(() => { if (!stale) setResult({ key, estimate: null }); });
+    }, 250);
+    return () => { stale = true; clearTimeout(timer); };
+  }, [canEstimate, key, pickup, destination, seats, allowSharing]);
+
+  const current = canEstimate && result?.key === key ? result : null;
+  const estimate = current?.estimate ?? null;
+  const estimating = canEstimate && !current;
+  const estimateError = !!current && current.estimate === null;
+
+  const handlePickup = (zone: string) => {
+    setPickup(zone);
+    if (zone === destination) setDestination('');
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;
+    if (!pickup || !destination) return;
     if (pickup === destination) { setError(t('p.req.sameZone')); return; }
     setError(''); setLoading(true);
     try {
-      const res = await passengerApi.requestRide(passengerId, pickup, destination, seats);
-      setSuccess(res.ride);
-    } catch (err: any) {
-      if (err instanceof ApiError) {
+      await passengerApi.requestRide({ pickupZone: pickup, destinationZone: destination, seatCount: seats, allowSharing });
+      onCreated(); // the ride now shows on the status tab
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'ACTIVE_RIDE_EXISTS') {
+        setHasActiveRide(true);
+        setError('');
+      } else if (err instanceof ApiError) {
         setError(t('common.errorWithStatus', { status: err.status, message: err.message }));
       } else {
-        setError(err.message || t('p.req.unexpected'));
+        setError(err instanceof Error && err.message ? err.message : t('p.req.unexpected'));
       }
-    } finally {
       setLoading(false);
     }
   };
 
-  if (success) {
-    return (
-      <div className="animate-in" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-        <SuccessBanner message={t('p.req.success')} />
-        <div className="ride-card">
-          <div className="ride-card__route">
-            <span className="ride-card__zone">{tz(success.pickupZone)}</span>
-            <span className="ride-card__arrow">→</span>
-            <span className="ride-card__zone">{tz(success.destinationZone)}</span>
-          </div>
-          <div className="fare-display" style={{ marginBottom: 16 }}>
-            <div>
-              <div className="fare-display__label">{t('p.req.estFare')}</div>
-              <div className="fare-display__amount">৳{success.estimatedFareBDT}</div>
-              <div className="fare-display__sub">{tp('p.req.forSeats', success.seatCount)}</div>
-            </div>
-            <StatusBadge status={success.status} />
-          </div>
-          <button className="btn btn--secondary btn--sm" onClick={() => setSuccess(null)}>
-            {t('p.req.another')}
-          </button>
-        </div>
-      </div>
-    );
-  }
+  const seatOptions = Array.from({ length: maxSeats }, (_, i) => i + 1);
 
   return (
     <div className="animate-in">
@@ -125,19 +167,31 @@ function RequestRideTab({ passengerId }: { passengerId: string }) {
 
       <div className="card">
         <div className="card__body">
+          {hasActiveRide && (
+            <div style={{ marginBottom: 16, display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-start' }}>
+              <ErrorBanner message={t('p.req.hasActive')} />
+              <button type="button" className="btn btn--secondary btn--sm" onClick={onViewActive}>
+                {t('p.req.viewActive')}
+              </button>
+            </div>
+          )}
           {error && <ErrorBanner message={error} />}
           <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 20, marginTop: error ? 16 : 0 }}>
+            <p style={{ fontSize: 13, color: 'var(--text-muted)', margin: 0 }}>
+              {t('p.req.bookingAs', { name: user.name, phone: user.phone ?? '' })}
+            </p>
+
             <div className="form-group">
               <label className="form-label" htmlFor="pickup-zone">{t('p.req.pickup')}</label>
               <select
                 id="pickup-zone"
                 className="form-control"
                 value={pickup}
-                onChange={(e) => setPickup(e.target.value)}
+                onChange={(e) => handlePickup(e.target.value)}
                 required
               >
                 <option value="">{t('p.req.pickupPh')}</option>
-                {DHAKA_ZONES.map((z) => <option key={z} value={z}>{tz(z)}</option>)}
+                {zones.map((z) => <option key={z} value={z}>{tz(z)}</option>)}
               </select>
             </div>
 
@@ -151,7 +205,7 @@ function RequestRideTab({ passengerId }: { passengerId: string }) {
                 required
               >
                 <option value="">{t('p.req.destPh')}</option>
-                {DHAKA_ZONES.filter((z) => z !== pickup).map((z) => (
+                {zones.filter((z) => z !== pickup).map((z) => (
                   <option key={z} value={z}>{tz(z)}</option>
                 ))}
               </select>
@@ -164,21 +218,65 @@ function RequestRideTab({ passengerId }: { passengerId: string }) {
                 className="form-control"
                 value={seats}
                 onChange={(e) => setSeats(Number(e.target.value))}
+                required
               >
-                {[1, 2, 3, 4].map((n) => (
+                {seatOptions.map((n) => (
                   <option key={n} value={n}>{tp('seats', n)}</option>
                 ))}
               </select>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>{t('p.req.seatsHint')}</div>
+            </div>
+
+            <div className="online-toggle">
+              <div style={{ flex: 1 }}>
+                <label className="online-toggle__label" htmlFor="allow-sharing">{t('p.req.share')}</label>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                  {allowSharing ? t('p.req.shareOn') : t('p.req.shareOff')}
+                </div>
+              </div>
+              <label className="toggle-switch">
+                <input
+                  id="allow-sharing"
+                  type="checkbox"
+                  checked={allowSharing}
+                  onChange={(e) => setAllowSharing(e.target.checked)}
+                />
+                <span className="toggle-switch__slider" />
+              </label>
+            </div>
+
+            {/* Fare preview */}
+            <div className="fare-display" id="fare-estimate" aria-live="polite">
+              <div>
+                <div className="fare-display__label">{t('p.req.estFare')}</div>
+                {estimate ? (
+                  <>
+                    <div className="fare-display__amount">৳{estimate.fareBDT}</div>
+                    <div className="fare-display__sub">
+                      {tp('p.req.forSeats', seats)}
+                      {' · '}
+                      {estimate.poolFareBDT !== null
+                        ? t('p.req.poolNote', { amount: estimate.poolFareBDT })
+                        : t('p.req.privateNote')}
+                    </div>
+                  </>
+                ) : (
+                  <div className="fare-display__sub">
+                    {estimating ? t('p.req.estimating') : estimateError ? t('p.req.estimateError') : t('p.req.estimateHint')}
+                  </div>
+                )}
+              </div>
             </div>
 
             <button
               id="request-ride-submit"
               type="submit"
               className="btn btn--primary btn--full"
-              disabled={loading || !pickup || !destination}
+              disabled={loading || hasActiveRide || !pickup || !destination || !estimate}
             >
               {loading ? t('p.req.submitting') : t('p.req.submit')}
             </button>
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: 0, textAlign: 'center' }}>{t('p.req.noPayment')}</p>
           </form>
         </div>
       </div>
@@ -190,9 +288,11 @@ function RequestRideTab({ passengerId }: { passengerId: string }) {
 function ActiveRidesTab({
   passengerId,
   onNavigate,
+  justRequested,
 }: {
   passengerId: string;
   onNavigate: (tab: Tab) => void;
+  justRequested: boolean;
 }) {
   const { t } = usePreferences();
   const [rides, setRides] = useState<Ride[]>([]);
@@ -242,6 +342,7 @@ function ActiveRidesTab({
       </div>
 
       {error && <ErrorBanner message={error} />}
+      {justRequested && <SuccessBanner message={t('p.req.success')} />}
       {cancelSuccess && <SuccessBanner message={cancelSuccess} />}
 
       {rides.length === 0 ? (
@@ -291,6 +392,11 @@ function ActiveRideCard({
         <span className="ride-card__arrow">→</span>
         <span className="ride-card__zone">{tz(ride.destinationZone)}</span>
         <StatusBadge status={ride.status} />
+        {ride.allowSharing === false && (
+          <span className="badge badge--matched" style={{ fontSize: 11, marginLeft: 6 }}>
+            {t('p.active.private')}
+          </span>
+        )}
         {ride.isSharedRide && (
           <span
             className="badge badge--matched"

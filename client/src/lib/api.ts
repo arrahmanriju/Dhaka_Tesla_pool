@@ -95,11 +95,29 @@ export interface OnboardingInput {
   profilePicture?: string;
 }
 
+export interface RideRequestInput {
+  pickupZone: string;
+  destinationZone: string;
+  seatCount: number;
+  allowSharing: boolean;
+}
+
+export interface FareEstimate {
+  /** Fare if nobody joins — what a private ride always costs (paisa) */
+  fare: number;
+  fareBDT: string;
+  /** Fare once a second passenger shares the ride (paisa); null for a private ride */
+  poolFare: number | null;
+  poolFareBDT: string | null;
+}
+
 export interface Ride {
   id: string;
   pickupZone: string;
   destinationZone: string;
   seatCount: number;
+  /** false = private ride, never pooled */
+  allowSharing?: boolean;
   /** Solo fare before any pool discount (paisa) */
   baseFare?: number;
   /** Current fare after applying/removing pool discount (paisa) */
@@ -171,17 +189,27 @@ export const authApi = {
 
 // ─── Passenger APIs ──────────────────────────────────────────────────────────
 
-export const DHAKA_ZONES = [
-  'Mirpur', 'Gulshan', 'Dhanmondi', 'Motijheel', 'Uttara',
-  'Banani', 'Mohammadpur', 'Rayer Bazar', 'Wari', 'Old Dhaka',
-  'Shyamoli', 'Farmgate', 'Tejgaon', 'Badda', 'Khilgaon',
-];
-
 export const passengerApi = {
-  requestRide: (passengerId: string, pickupZone: string, destinationZone: string, seatCount: number) =>
+  /** Zones and seat limits the server accepts — the dropdown is built from this, never hard-coded. */
+  getRideOptions: () =>
+    request<{ zones: string[]; minSeats: number; maxSeats: number }>('/ride-requests/zones'),
+
+  /** Fare preview for the form. Computed by the server so it always matches the fare that gets stored. */
+  estimateFare: (input: RideRequestInput) => {
+    const q = new URLSearchParams({
+      pickupZone: input.pickupZone,
+      destinationZone: input.destinationZone,
+      seatCount: String(input.seatCount),
+      allowSharing: String(input.allowSharing),
+    });
+    return request<FareEstimate>(`/ride-requests/estimate?${q}`);
+  },
+
+  /** The passenger is identified by the login token; name and phone stay on the account. */
+  requestRide: (input: RideRequestInput) =>
     request<{ rideRequest: Ride }>('/ride-requests', {
       method: 'POST',
-      body: JSON.stringify({ passengerId, pickupZone, destinationZone, seatCount }),
+      body: JSON.stringify(input),
     }).then(res => ({ ride: res.rideRequest })),
 
   getActiveRides: (passengerId: string) =>

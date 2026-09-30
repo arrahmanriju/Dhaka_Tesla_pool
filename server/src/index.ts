@@ -9,7 +9,7 @@ import passengerRoutes from './routes/passenger';
 import { sequelize, storagePath } from './models';
 import { UPLOADS_DIR } from './utils/onboarding';
 import onboardingRoutes from './routes/onboarding';
-import { migrateUsersTable } from './migrations';
+import { migrateUsersTable, migrateRideRequestsTable, ensureOneActiveRideIndex } from './migrations';
 
 dotenv.config();
 
@@ -57,12 +57,17 @@ export { app };
 
 if (require.main === module) {
   // Sync database and start server
-  migrateUsersTable().then(() => sequelize.sync()).then(() => {
-    console.log('Database synced');
-    app.listen(port, () => {
-      console.log(`Server is running on port ${port}`);
+  migrateUsersTable()
+    .then(() => migrateRideRequestsTable())
+    .then(() => sequelize.sync())
+    .then(() => ensureOneActiveRideIndex())
+    .then(() => {
+      console.log('Database synced');
+      app.listen(port, () => {
+        console.log(`Server is running on port ${port}`);
+      });
+    })
+    .catch(err => {
+      console.error('Failed to sync database:', err);
     });
-  }).catch(err => {
-    console.error('Failed to sync database:', err);
-  });
 }

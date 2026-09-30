@@ -16,6 +16,7 @@
 import request from 'supertest';
 import { app } from '../index';
 import { sequelize, User, Vehicle, RideRequest } from '../models';
+import { asUser } from './helpers';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -58,9 +59,7 @@ async function requestRide(
   destination = 'Banani',
   seats = 1
 ) {
-  const res = await request(app).post('/ride-requests').send({
-    passengerId, pickupZone: pickup, destinationZone: destination, seatCount: seats,
-  });
+  const res = await request(app).post('/ride-requests').set(asUser(passengerId)).send({ pickupZone: pickup, destinationZone: destination, seatCount: seats });
   return res;
 }
 

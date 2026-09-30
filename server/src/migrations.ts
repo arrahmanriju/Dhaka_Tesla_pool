@@ -65,3 +65,40 @@ export async function migrateUsersTable(): Promise<void> {
     await sequelize.query('PRAGMA foreign_keys = ON');
   }
 }
+
+/**
+ * Idempotent: adds `RideRequests.allowSharing` to a database created before private rides existed.
+ * Existing rows become shared rides (DEFAULT 1), which is how they were treated before.
+ * `sequelize.sync()` never adds columns to an existing table, so this has to be done by hand.
+ */
+export async function migrateRideRequestsTable(): Promise<void> {
+  const [cols] = (await sequelize.query('PRAGMA table_info(`RideRequests`)')) as [{ name: string }[], unknown];
+  if (cols.length === 0) return; // fresh database — sync() will create the table with the column
+  if (cols.some((c) => c.name === 'allowSharing')) return;
+
+  await sequelize.query('ALTER TABLE `RideRequests` ADD COLUMN `allowSharing` TINYINT(1) NOT NULL DEFAULT 1');
+  console.log('[migrate] RideRequests: added allowSharing column');
+}
+
+/**
+ * Database-level guarantee behind "one active ride per passenger": a partial unique index over the
+ * non-terminal statuses. The route checks first for a friendly error; this catches two requests
+ * from the same passenger racing past that check.
+ *
+ * If a database already holds passengers with several active rides the index cannot be built. That
+ * is logged instead of crashing startup (the route-level check still applies); cancel the extra
+ * rides and restart to get the index.
+ */
+export async function ensureOneActiveRideIndex(): Promise<void> {
+  try {
+    await sequelize.query(
+      'CREATE UNIQUE INDEX IF NOT EXISTS `ride_requests_one_active_per_passenger` ON `RideRequests` (`passengerId`) ' +
+        "WHERE `status` IN ('REQUESTED', 'MATCHED', 'DRIVER_ARRIVED', 'STARTED')",
+    );
+  } catch (err) {
+    console.warn(
+      '[migrate] RideRequests: could not create the one-active-ride index (some passenger has several active rides):',
+      (err as Error).message,
+    );
+  }
+}
