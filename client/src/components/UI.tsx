@@ -82,9 +82,12 @@ export function PassengerFare({ ride }: { ride: Ride }) {
       ) : open ? (
         <span className="fare-line__note">{t('fare.mayDrop')}</span>
       ) : null}
-      {(ride.fareLocked ?? (ride.status === 'STARTED' || ride.status === 'COMPLETED' || leftEarly)) && (
-        <span className="fare-line__lock" title={t('fare.lockedTitle')}>🔒 {t('fare.locked')}</span>
-      )}
+      {/* Final only once the passenger's own journey has ended; before that it follows who is in the car */}
+      {(ride.fareFinal ?? (ride.status === 'COMPLETED' || leftEarly)) ? (
+        <span className="fare-line__lock" title={t('fare.lockedTitle')}>✓ {t('fare.locked')}</span>
+      ) : ride.status === 'STARTED' ? (
+        <span className="fare-line__note" title={t('fare.estimateTitle')}>≈</span>
+      ) : null}
     </span>
   );
 }

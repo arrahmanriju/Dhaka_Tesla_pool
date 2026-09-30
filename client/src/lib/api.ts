@@ -149,15 +149,20 @@ export interface Ride {
   allowSharing?: boolean;
   /** This passenger's own fare when riding alone (whole taka) */
   baseFare?: number;
-  /** What this passenger pays right now (whole taka); drops as others join, final once STARTED */
+  /**
+   * What this passenger pays (whole taka). An estimate that follows who is in the car, until their own
+   * journey ends (COMPLETED / CANCELLED_IN_TRANSIT), when `fareFinal` is true and it is settled.
+   */
   estimatedFare: number;
   /** What sharing saves this passenger (whole taka). 0 when riding alone or private. */
   poolDiscount?: number;
-  /** true once the trip has started: the fare can no longer change */
-  fareLocked?: boolean;
+  /** true once the passenger's own journey has ended: `estimatedFare` is then the final, settled fare */
+  fareFinal?: boolean;
+  /** This passenger's own fare, stretch by stretch (no zone names: they would reveal where others boarded) */
+  fareBreakdown?: FareBreakdown | null;
   /** Passengers currently in the pool, including this one */
   poolSize?: number;
-  /** Percentage of their own base fare this passenger pays (100 / 70 / 55) */
+  /** Percentage of the distance charge this passenger pays with the current pool (100 / 70 / 55) */
   shareRatePercent?: number;
   status: RideStatus;
   canCancel?: boolean;
@@ -195,7 +200,7 @@ export interface Ride {
     joinedMidTrip?: boolean;
     cancellationZone?: string;
     chargedFare?: number;
-    lockedFare?: number;
+    fullTripEstimate?: number;
   }[];
   /** true while the ride is STARTED: the passenger may still leave at a zone of their choice */
   canCancelInTransit?: boolean;
@@ -220,19 +225,33 @@ export interface PoolEvent {
   /** CANCELLED_IN_TRANSIT only: where the passenger left, what they were charged, and the full-trip fare */
   cancellationZone?: string;
   chargedFare?: number;
-  lockedFare?: number;
+  /** What they were on track to pay to their original destination just before this journey ended */
+  fullTripEstimate?: number;
 }
 
-/** The pro-rated bill for leaving a started ride: fare = baseCharge + distanceCharge − poolDiscount. */
-export interface ProRatedBill {
-  baseCharge: number;
+/** One stretch of a passenger's journey between two checkpoints (zone names are not sent to passengers). */
+export interface FareSegment {
   distanceKm: number;
+  /** distanceKm × ৳20 × seats */
   distanceCharge: number;
-  grossFare: number;
-  poolDiscount: number;
+  /** Passengers on board during this stretch */
+  passengers: number;
+  /** 100 when alone, 70 with 2, 55 with 3 */
+  ratePercent: number;
+  /** distanceCharge × ratePercent / 100 */
+  charge: number;
+}
+
+/** fare = ৳100 base + Σ segment charges, to the nearest ৳5. `final` once the passenger's journey has ended. */
+export interface FareBreakdown {
+  baseCharge: number;
+  segments: FareSegment[];
+  distanceTotal: number | null;
+  soloFare: number | null;
+  poolDiscount: number | null;
   fare: number;
-  lockedFare: number;
-  limited: boolean;
+  fullTripEstimate?: number | null;
+  final?: boolean;
 }
 
 export interface Vehicle {
@@ -310,7 +329,7 @@ export const passengerApi = {
 
   /** Leave a ride that has already started, at the zone where the passenger is dropped off. */
   cancelInTransit: (rideId: string, cancellationZone: string) =>
-    request<{ status: RideStatus; cancellationZone: string; fare: ProRatedBill }>(
+    request<{ status: RideStatus; cancellationZone: string; fare: FareBreakdown }>(
       `/passenger/rides/${rideId}/cancel-in-transit`,
       { method: 'PATCH', body: JSON.stringify({ cancellationZone }) }
     ),

@@ -27,7 +27,7 @@ export function PoolTimeline({ refreshKey }: { refreshKey: unknown }) {
           name: e.passengerFirstName,
           zone: e.cancellationZone ? tz(e.cancellationZone) : '—',
           fare: e.chargedFare ?? 0,
-          locked: e.lockedFare ?? 0,
+          estimate: e.fullTripEstimate ?? 0,
         })
       : e.joinedMidTrip
       ? t('d.timeline.MATCHED_MID', { name: e.passengerFirstName, n: e.ridersOnboard })

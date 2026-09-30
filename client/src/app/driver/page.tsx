@@ -345,7 +345,7 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
               <div className="earnings-card__amount">৳{totalEarnings}</div>
               <div className="earnings-card__sub">
                 {tp('d.active.earningsFrom', rides.length)}
-                {rides.every((r) => r.fareLocked) && ` · 🔒 ${t('fare.locked')}`}
+                {rides.every((r) => r.fareFinal) && ` · ✓ ${t('fare.locked')}`}
               </div>
             </div>
             <p className="earnings-card__note">{t('d.active.earningsNote')}</p>
