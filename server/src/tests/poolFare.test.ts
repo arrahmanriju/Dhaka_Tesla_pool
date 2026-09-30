@@ -4,7 +4,8 @@
  *
  *   tripCost = ৳100 + distanceKm × ৳20 × seats            (what the route costs alone)
  *   1 on board: fare = tripCost        n ≥ 2 on board: fare = tripCost / n + ৳20 driver bonus
- *   rounded to the nearest whole taka (halves up); the driver earns the SUM of what the passengers pay
+ *   a shared split is rounded UP to the next whole taka for every passenger; the driver earns the SUM of what
+ *   the passengers pay (so a rounded-up split leaves the driver the extra fraction)
  *
  * The story cast is the seed data: Jashim (driver, "Bullet", 3 seats) and passengers Nusrat, Rafiq
  * and Shirin, all wanting Mohakhali → Badda. That route is 4 km: tripCost 100 + 80 = ৳180, so
@@ -45,23 +46,23 @@ describe('fare math', () => {
       expect(fare * 2).toBe(240);
     });
 
-    it('3 passengers pay 200 / 3 + 20 = 66.67 + 20 → ৳87 each and the driver earns ৳261', () => {
+    it('3 passengers pay 200 / 3 + 20 = 66.67 → 67 (rounded up) + 20 → ৳87 each and the driver earns ৳261', () => {
       const fare = pooledFare('Mirpur', 'Mohammadpur', 1, 3);
       expect(fare).toBe(87);
       expect(fare * 3).toBe(261);
     });
   });
 
-  describe('trip cost and rounding to the nearest whole taka', () => {
+  describe('trip cost and rounding a split up to the next whole taka', () => {
     it('Mohakhali → Badda (4 km, 1 seat) has a trip cost of ৳180', () => {
       expect(calculateBaseFare('Mohakhali', 'Badda', 1)).toBe(180);
     });
 
     it.each([
-      // route, km, alone (tripCost), with 2 (tripCost / 2 + 20), with 3 (tripCost / 3 + 20, rounded)
+      // route, km, alone (tripCost), with 2 (tripCost / 2 + 20), with 3 (tripCost / 3 rounded UP, + 20)
       ['Mohakhali', 'Badda', 4, 180, 110, 80], // 90 + 20 · 60 + 20
-      ['Mohakhali', 'Gulshan', 3, 160, 100, 73], // 80 + 20 · 53.33 → 53, + 20
-      ['Mohakhali', 'Banani', 2, 140, 90, 67], // 70 + 20 · 46.67 → 47, + 20
+      ['Mohakhali', 'Gulshan', 3, 160, 100, 74], // 80 + 20 · 53.33 → 54, + 20
+      ['Mohakhali', 'Banani', 2, 140, 90, 67], // 70 + 20 · 46.67 → 47, + 20 (rounded up)
       ['Gulshan', 'Gulshan 1', 1, 120, 80, 60], // 60 + 20 · 40 + 20
       ['Mirpur', 'Mohammadpur', 5, 200, 120, 87], // 100 + 20 · 66.67 → 67, + 20
       ['Gulshan', 'Dhanmondi', 10, 300, 170, 120], // 150 + 20 · 100 + 20
@@ -396,11 +397,11 @@ describe('Pool fare split — Nusrat, Rafiq, Shirin and Jashim (Bullet)', () => 
     it('with three passengers on different routes: each own trip cost / 3, plus ৳20', async () => {
       const rides = await seatPool([
         { passenger: nusrat, to: 'Badda', base: 180 }, // 180 / 3 + 20 = 60 + 20 = 80
-        { passenger: rafiq, to: 'Gulshan', base: 160 }, // 160 / 3 = 53.33 → 53, + 20 = 73
+        { passenger: rafiq, to: 'Gulshan', base: 160 }, // 160 / 3 = 53.33 → rounded UP to 54, + 20 = 74
         { passenger: shirin, to: 'Banani', base: 140 }, // 140 / 3 = 46.67 → 47, + 20 = 67
       ]);
-      expect(rides.map((r) => r.estimatedFare)).toEqual([80, 73, 67]);
-      expect((await driverActive()).body.totalEarnings).toBe(220);
+      expect(rides.map((r) => r.estimatedFare)).toEqual([80, 74, 67]);
+      expect((await driverActive()).body.totalEarnings).toBe(221);
     });
 
     it('the literal story: a 5 km route pays ৳200 → ৳120 each → ৳87 each, driver ৳200 → ৳240 → ৳261', async () => {

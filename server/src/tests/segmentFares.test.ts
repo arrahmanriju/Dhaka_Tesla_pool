@@ -5,7 +5,8 @@
  *   a segment of segKm gets  segKm / journeyKm  of the trip cost (so the ৳100 base is spread by distance)
  *   1 on board:   segmentFare = that share
  *   n ≥ 2 on board: segmentFare = share / n + ৳20 driver bonus
- *   fare = Σ segmentFare, rounded to the nearest whole taka (halves up) on the RUNNING total
+ *   a shared split is rounded UP to the next whole taka (for every passenger on the segment); the solo
+ *   segments of a journey are rounded together to the nearest taka. fare = Σ segmentFare
  *
  * Worked example (numbers you can check by hand). Zone distances: Uttara–Mirpur 9 km, Mirpur–Dhanmondi 7 km.
  *   Nusrat rides Uttara → Dhanmondi and starts alone         checkpoint (Uttara, 1)
@@ -15,8 +16,8 @@
  *
  *   Nusrat  journeyKm 9 + 7 = 16, tripCost 100 + 20 × 16 = ৳420
  *           Uttara → Mirpur     9/16 × 420 = 236.25            alone                     236.25
- *           Mirpur → Dhanmondi  7/16 × 420 = 183.75, / 2 = 91.875, + 20 = 111.875   111.875
- *           exact total 348.125 → ৳348   (charges 236 + 112; alone all the way it would be ৳420, pooling saved ৳72)
+ *           Mirpur → Dhanmondi  7/16 × 420 = 183.75, / 2 = 91.875, rounded UP to 92, + 20 = 112
+ *           fare = 236 + 112 = ৳348   (alone all the way it would be ৳420, pooling saved ৳72)
  *   Rafiq   journeyKm 7, tripCost 100 + 140 = ৳240;  240 / 2 + 20 = ৳140     (alone: ৳240, saved ৳100)
  *   The driver earns ৳488.
  *
@@ -42,7 +43,7 @@ describe('segmentFare (pure)', () => {
     });
     expect(nusrat.segments).toEqual([
       { fromZone: 'Uttara', toZone: 'Mirpur', distanceKm: 9, passengers: 1, driverBonus: 0, charge: 236 }, // 236.25
-      { fromZone: 'Mirpur', toZone: 'Dhanmondi', distanceKm: 7, passengers: 2, driverBonus: 20, charge: 112 }, // 111.875, so the total is 348.125 → 348
+      { fromZone: 'Mirpur', toZone: 'Dhanmondi', distanceKm: 7, passengers: 2, driverBonus: 20, charge: 112 }, // 183.75 / 2 = 91.875 → 92, + 20
     ]);
     expect(nusrat).toMatchObject({ soloFare: 420, fare: 348, poolDiscount: 72 });
   });
@@ -65,9 +66,9 @@ describe('segmentFare (pure)', () => {
     expect(shared.fare).toBe(160); // 280 / 2 + 20
   });
 
-  it('three on board: tripCost / 3 + 20, rounded to the nearest taka', () => {
-    // 280 / 3 = 93.33 → 93, + 20 = ৳113
-    expect(segmentFare({ points: [{ zone: 'Uttara', passengerCount: 3 }], exitZone: 'Mirpur', seatCount: 1 }).fare).toBe(113);
+  it('three on board: tripCost / 3 rounded UP, + 20', () => {
+    // 280 / 3 = 93.33 → 94 (up, not 93), + 20 = ৳114
+    expect(segmentFare({ points: [{ zone: 'Uttara', passengerCount: 3 }], exitZone: 'Mirpur', seatCount: 1 }).fare).toBe(114);
   });
 
   it('a private ride is charged the full trip cost of every segment, whatever the count', () => {
@@ -202,7 +203,7 @@ describe('Segment fares end to end — Jashim (Bullet), Nusrat, Rafiq, Shirin', 
       const bill = (await view(nusratRide, nusrat)).body.ride.fareBreakdown;
       expect(bill.segments).toEqual([
         { distanceKm: 9, passengers: 1, driverBonus: 0, charge: 236 }, // solo: her share of the trip cost, 236.25
-        { distanceKm: 7, passengers: 2, driverBonus: 20, charge: 112 }, // shared: split two ways + 20 (111.875)
+        { distanceKm: 7, passengers: 2, driverBonus: 20, charge: 112 }, // shared: split two ways (91.875 → 92) + 20
       ]);
       expect(bill).toMatchObject({ final: true, soloFare: 420, poolDiscount: 72, fare: 348 });
       expect(await ride(nusratRide)).toMatchObject({ status: 'COMPLETED', estimatedFare: 348, poolDiscount: 72 });
@@ -276,8 +277,8 @@ describe('Segment fares end to end — Jashim (Bullet), Nusrat, Rafiq, Shirin', 
       await start(c);
       for (const id of [a, b, c]) await driverAction(id, 'complete');
 
-      // Nusrat: journeyKm 16, tripCost 420. Uttara → Mirpur alone 9/16 × 420 = 236.25;
-      //         Mirpur → Dhanmondi 3 on board 7/16 × 420 = 183.75 / 3 + 20 = 81.25.  Exact total 317.5 → ৳318 (a tie: halves round up)
+      // Nusrat: journeyKm 16, tripCost 420. Uttara → Mirpur alone 9/16 × 420 = 236.25 → 236;
+      //         Mirpur → Dhanmondi 3 on board 7/16 × 420 = 183.75 / 3 = 61.25 → rounded UP to 62, + 20 = 82.  Fare 236 + 82 = ৳318
       // Rafiq and Shirin: journeyKm 7, tripCost 240; 3 on board over the whole 7 km: 240 / 3 + 20 = ৳100 each
       const fares = await Promise.all([a, b, c].map(async (id) => (await ride(id)).estimatedFare));
       expect(fares).toEqual([318, 100, 100]);
@@ -291,7 +292,7 @@ describe('Segment fares end to end — Jashim (Bullet), Nusrat, Rafiq, Shirin', 
         fromBills += sum;
       }
       expect(fromBills).toBe(518); // what the driver earns: 318 + 100 + 100
-      // the stretch Nusrat travelled alone was 236 of her 318; the other 82 was the shared stretch (81.25, rounded on the running total)
+      // the stretch Nusrat travelled alone was 236 of her 318; the other 82 was the shared stretch (61.25 → 62, + 20)
       const nusratBill = (await view(a, nusrat)).body.ride.fareBreakdown;
       expect(nusratBill.segments.map((x: any) => x.charge)).toEqual([236, 0, 82]);
     });

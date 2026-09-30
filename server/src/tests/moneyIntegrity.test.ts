@@ -8,7 +8,7 @@ import { app } from '../index';
 import { sequelize, User, Vehicle, RideRequest, RideEvent, WalletTransaction } from '../models';
 import { DHAKA_ZONES } from '../models/RideRequest';
 import { collectPayment } from '../utils/payments';
-import { FarePoint, pooledFare, segmentDistanceKm, segmentFare } from '../utils/fareCalculator';
+import { FarePoint, pooledFare, segmentDistanceKm, segmentFare, segmentFareFor } from '../utils/fareCalculator';
 import { asUser } from './helpers';
 
 beforeAll(async () => {
@@ -20,7 +20,7 @@ afterAll(async () => {
 
 describe('money is integer taka', () => {
   describe('the arithmetic', () => {
-    it('a single shared segment is exactly tripCost / n rounded half up, plus the ৳20 bonus (checked with integer maths)', () => {
+    it('a single shared segment is exactly tripCost / n rounded UP, plus the ৳20 bonus (checked with integer maths)', () => {
       for (const a of DHAKA_ZONES) {
         for (const b of DHAKA_ZONES) {
           const km = segmentDistanceKm(a, b);
@@ -29,8 +29,8 @@ describe('money is integer taka', () => {
             const tripCost = 100 + 20 * seats * km;
             for (const n of [1, 2, 3, 4, 5]) {
               const fare = segmentFare({ points: [{ zone: a, passengerCount: n }], exitZone: b, seatCount: seats }).fare;
-              // round(tripCost / n) half up = floor((2 × tripCost + n) / (2n)): no fraction ever appears
-              const expected = n === 1 || km === 0 ? tripCost : Math.floor((2 * tripCost + n) / (2 * n)) + 20;
+              // ceil(tripCost / n) = floor((tripCost + n − 1) / n): no fraction ever appears
+              const expected = n === 1 || km === 0 ? tripCost : Math.floor((tripCost + n - 1) / n) + 20;
               expect(fare).toBe(expected);
             }
           }
@@ -61,23 +61,25 @@ describe('money is integer taka', () => {
       }
     });
 
-    // The fare of a multi-segment journey, computed a second way: with exact BigInt fractions, then
-    // rounded once (half up). It must equal segmentFare's running-total rounding, and the segment
-    // charges must add up to it exactly.
-    const exactFare = (points: FarePoint[], exitZone: string, seats: number): bigint => {
-      const legs = points.map((p, i) => ({ km: segmentDistanceKm(p.zone, points[i + 1]?.zone ?? exitZone), n: p.passengerCount }));
-      const journeyKm = legs.reduce((sum, l) => sum + l.km, 0);
-      const solo = 100 + 20 * seats * journeyKm;
-      // numerator over the denominator journeyKm × 60 (60 = lcm of every count used below, 1..5)
-      const den = BigInt(journeyKm * 60);
-      let num = 0n;
+    // The fare of a multi-segment journey, computed a second way: with BigInt integer maths, one segment at a time.
+    // A shared segment is ceil(segKm × solo / (journeyKm × n)) + 20; the solo segments are rounded together
+    // (nearest taka, halves up, on their running total). It must equal segmentFare, and the segment charges
+    // must add up to the fare exactly.
+    const expectedFare = (points: FarePoint[], exitZone: string, seats: number): bigint => {
+      const legs = points.map((p, i) => ({ km: BigInt(segmentDistanceKm(p.zone, points[i + 1]?.zone ?? exitZone)), n: BigInt(p.passengerCount) }));
+      const journeyKm = legs.reduce((sum, l) => sum + l.km, 0n);
+      const solo = 100n + 20n * BigInt(seats) * journeyKm;
+      let fare = 0n;
+      let soloExact = 0n; // in units of 1/journeyKm
       for (const l of legs) {
-        num += BigInt(l.km * solo * (60 / l.n)) + (l.n >= 2 && l.km > 0 ? BigInt(20) * den : 0n);
+        if (l.km === 0n) continue;
+        if (l.n === 1n) soloExact += l.km * solo;
+        else fare += (l.km * solo + journeyKm * l.n - 1n) / (journeyKm * l.n) + 20n; // ceil, then the bonus
       }
-      return (2n * num + den) / (2n * den); // round half up
+      return fare + (2n * soloExact + journeyKm) / (2n * journeyKm); // solo part: nearest, halves up
     };
 
-    it('a journey with several segments: charges are integers, add up to the fare, and the fare is the exact total rounded once', () => {
+    it('a journey with several segments: charges are integers, add up to the fare, and match an independent integer calculation', () => {
       const zones = ['Uttara', 'Mirpur', 'Dhanmondi', 'Mohakhali', 'Badda', 'Gulshan', 'Banani'];
       let checked = 0;
       for (let i = 0; i < zones.length; i++) {
@@ -90,7 +92,7 @@ describe('money is integer taka', () => {
                 const bill = segmentFare({ points, exitZone: zones[k]!, seatCount: seats });
                 expect(bill.segments.every((s) => Number.isInteger(s.charge))).toBe(true);
                 expect(bill.segments.reduce((sum, s) => sum + s.charge, 0)).toBe(bill.fare);
-                expect(BigInt(bill.fare)).toBe(exactFare(points, zones[k]!, seats));
+                expect(BigInt(bill.fare)).toBe(expectedFare(points, zones[k]!, seats));
                 checked++;
               }
             }
@@ -111,15 +113,16 @@ describe('money is integer taka', () => {
       expect(bill.segments.map((s) => s.charge)).toEqual([225, 175, 100]);
     });
 
-    it('a tie rounds up: an exact total of 317.5 is ৳318, never ৳317', () => {
-      // journeyKm 16, tripCost 420: 9 km alone = 236.25, then 7 km with 3 on board = 183.75 / 3 + 20 = 81.25
-      const bill = segmentFare({
-        points: [{ zone: 'Uttara', passengerCount: 1 }, { zone: 'Mirpur', passengerCount: 3 }],
-        exitZone: 'Dhanmondi',
-        seatCount: 1,
-      });
-      expect(bill.fare).toBe(318);
-      expect(bill.segments.map((s) => s.charge)).toEqual([236, 82]);
+    it('every passenger sharing a segment pays the same rounded-up amount, and the driver keeps the remainder', () => {
+      // tripCost 260 shared by 3 is 86.67: each pays 87 (up) + 20 = 107, so the three pay 321 for 260 + 60 = 320
+      for (const n of [2, 3, 4, 5, 6, 7]) {
+        const each = segmentFareFor(260, n);
+        expect(each).toBe(Math.ceil(260 / n) + 20);
+        const collected = each * n;
+        expect(Number.isInteger(collected)).toBe(true);
+        expect(collected).toBeGreaterThanOrEqual(260 + 20 * n); // never less than the cost plus the bonuses
+        expect(collected - (260 + 20 * n)).toBeLessThan(n); // and the extra is less than one taka each
+      }
     });
 
     it('a wallet debit refuses a fractional, negative or unsafe amount instead of truncating it', async () => {
