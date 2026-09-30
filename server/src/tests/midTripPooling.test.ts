@@ -7,8 +7,8 @@
  *   - Shirin asks for a ride the same way but to a different place (further ahead than Rafiq's).
  *   - Someone heading somewhere unrelated, or asking for more seats than are left, is turned away.
  *
- * Fares stay as documented in the README: a started ride's fare is locked at 100% of what it was
- * when it started, and whoever joins later pays the shared rate for the pool they join.
+ * Fares follow the segment model in the README: a passenger is priced by who is actually on board,
+ * and the fare is final only when their own journey ends.
  * The direction rule itself is unit-tested by hand-checkable numbers in routeDirection.test.ts.
  */
 import request from 'supertest';
@@ -57,7 +57,7 @@ async function startRide(rideId: string) {
   expect((await driverAction(rideId, 'start')).status).toBe(200);
 }
 
-/** Nusrat is on Bullet and her trip has STARTED (alone, so her fare is locked at ৳180). */
+/** Nusrat is on Bullet and her trip has STARTED (alone on board, so her running fare is the solo ৳180). */
 async function nusratIsTravelling(trip: Trip = MOHAKHALI_TO_BADDA): Promise<string> {
   const id = await joinPool(nusrat, trip);
   await startRide(id);
@@ -139,7 +139,7 @@ describe('Mid-trip pooling — Jashim (Bullet, 3 seats), Nusrat, Rafiq, Shirin',
 
   // ─────────────────────────── Person 2 joins a started ride ───────────────────────────
   describe('Person 2 joins Nusrat’s started ride', () => {
-    it('Rafiq (Mohakhali → Gulshan 1) is accepted mid-trip; Nusrat’s started fare stays locked', async () => {
+    it('Rafiq (Mohakhali → Gulshan 1) is accepted mid-trip; Nusrat is unchanged until he boards', async () => {
       const nusratRide = await nusratIsTravelling();
       expect(await fareOf(nusratRide)).toBe(180);
 
@@ -150,9 +150,9 @@ describe('Mid-trip pooling — Jashim (Bullet, 3 seats), Nusrat, Rafiq, Shirin',
       expect(res.body.rideRequest.status).toBe('MATCHED');
       expect(await statusOf(nusratRide)).toBe('STARTED');
       expect(await occupied()).toBe(2);
-      // Nusrat's fare was locked at ৳180 when her trip started. Rafiq joins a pool of 2: 70% of his own ৳180.
+      // Nusrat is still alone on board (৳180). Rafiq is matched into a pool of 2: 100 + 80 × 70% = 156 → ৳155.
       expect(await fareOf(nusratRide)).toBe(180);
-      expect(await fareOf(created.body.rideRequest.id)).toBe(125);
+      expect(await fareOf(created.body.rideRequest.id)).toBe(155);
     });
 
     it('Rafiq then goes through his own lifecycle while Nusrat is still riding', async () => {
@@ -217,9 +217,9 @@ describe('Mid-trip pooling — Jashim (Bullet, 3 seats), Nusrat, Rafiq, Shirin',
       const res = await accept(shirinReq.body.rideRequest.id);
       expect(res.status).toBe(200);
       expect(await occupied()).toBe(3);
-      // Pool of 3 → 55%. Shirin: 55% of ৳180 = ৳99 → ৳100. Rafiq (not started) is re-priced to ৳100; Nusrat stays ৳180.
-      expect(await fareOf(shirinReq.body.rideRequest.id)).toBe(100);
-      expect(await fareOf(rafiqRide)).toBe(100);
+      // Pool of 3: 100 + 80 × 55% = 144 → ৳145 for Shirin, and Rafiq (matched, not on board) is re-priced to ৳145. Nusrat is alone on board: ৳180.
+      expect(await fareOf(shirinReq.body.rideRequest.id)).toBe(145);
+      expect(await fareOf(rafiqRide)).toBe(145);
       expect(await fareOf(nusratRide)).toBe(180);
     });
 
@@ -413,11 +413,11 @@ describe('Mid-trip pooling — Jashim (Bullet, 3 seats), Nusrat, Rafiq, Shirin',
       return { nusratRide, rafiqRide, shirinRide };
     }
 
-    it('fares are per passenger: Nusrat ৳180 (locked), Rafiq ৳90, Shirin ৳100', async () => {
+    it('fares are per passenger: Nusrat ৳180 (alone on board), Rafiq ৳135, Shirin ৳145', async () => {
       const { nusratRide, rafiqRide, shirinRide } = await threeOnBullet();
       expect(await fareOf(nusratRide)).toBe(180);
-      expect(await fareOf(rafiqRide)).toBe(90); // 55% of 160 = 88 → 90
-      expect(await fareOf(shirinRide)).toBe(100);
+      expect(await fareOf(rafiqRide)).toBe(135); // 100 + 60 × 55% = 133 → 135
+      expect(await fareOf(shirinRide)).toBe(145);
     });
 
     it('nobody’s response carries another passenger’s fare, route, phone or id', async () => {
@@ -430,11 +430,11 @@ describe('Mid-trip pooling — Jashim (Bullet, 3 seats), Nusrat, Rafiq, Shirin',
       };
 
       // Own fare only
-      expect((await passengerActive(r)).body.rides[0]).toMatchObject({ estimatedFare: 90 });
-      expect((await passengerActive(n)).body.rides[0]).toMatchObject({ estimatedFare: 180, fareLocked: true });
-      expect(bodies.rafiq).not.toMatch(/"estimatedFare":(180|100)\b/);
-      expect(bodies.nusrat).not.toMatch(/"estimatedFare":(90|100)\b/);
-      expect(bodies.shirin).not.toMatch(/"estimatedFare":(180|90)\b/);
+      expect((await passengerActive(r)).body.rides[0]).toMatchObject({ estimatedFare: 135 });
+      expect((await passengerActive(n)).body.rides[0]).toMatchObject({ estimatedFare: 180, fareFinal: false });
+      expect(bodies.rafiq).not.toMatch(/"estimatedFare":(180|145)\b/);
+      expect(bodies.nusrat).not.toMatch(/"estimatedFare":(135|145)\b/);
+      expect(bodies.shirin).not.toMatch(/"estimatedFare":(180|135)\b/);
 
       // No ids or phone numbers of the others
       for (const [me, others] of [[n, [r, s]], [r, [n, s]], [s, [n, r]]] as const) {

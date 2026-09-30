@@ -2,16 +2,15 @@
  * Pooling test suite — covers all cases A–J specified in the PRD.
  *
  * Fare model (reference) — money is whole taka, rounded to the nearest ৳5:
- *   base fare      = 100 + distanceKm × 20 × seatCount        (the passenger's OWN route)
- *   passenger fare = base fare × share rate
- *   share rate     = 100% alone · 70% with 2 passengers · 55% with 3
- *   poolDiscount   = base fare − passenger fare (what sharing saves them)
+ *   fare           = 100 + distanceKm × 20 × seatCount × share rate   (the passenger's OWN route)
+ *   share rate     = 100% alone · 70% with 2 passengers · 55% with 3 (applies to the distance charge, not the ৳100)
+ *   poolDiscount   = solo fare − fare (what sharing saves them)
  *
  * Gulshan → Banani = 2 km → base ৳140
  *   Solo:            140          = ৳140
- *   Pooled (2):      140 × 70% = 98  → ৳100 each (saves ৳40)
+ *   Pooled (2):      100 + 40 × 70% = 128 → ৳130 each (saves ৳10)
  *
- * The full 1 / 2 / 3-passenger story, the fare lock and rounding live in poolFare.test.ts.
+ * The full 1 / 2 / 3-passenger story and rounding live in poolFare.test.ts; segment fares in segmentFares.test.ts.
  */
 
 import request from 'supertest';
@@ -114,14 +113,14 @@ describe('Pooling — all cases A–J', () => {
     // Driver accepts P2 → now 2 in pool, BOTH should be discounted
     const acc2 = await acceptRide(app, r2.body.rideRequest.id, driver.id);
     expect(acc2.status).toBe(200);
-    // P2's fare: 70% of 140 = 98 → ৳100, saving ৳40
-    expect(acc2.body.rideRequest.estimatedFare).toBe(100);
-    expect(acc2.body.rideRequest.poolDiscount).toBe(40);
+    // P2's fare: 100 + 40 × 70% = 128 → ৳130, saving ৳10
+    expect(acc2.body.rideRequest.estimatedFare).toBe(130);
+    expect(acc2.body.rideRequest.poolDiscount).toBe(10);
 
     // P1's fare must also have been recalculated
     const p1Ride = await RideRequest.findByPk(r1.body.rideRequest.id);
-    expect((p1Ride as any).estimatedFare).toBe(100);
-    expect((p1Ride as any).poolDiscount).toBe(40);
+    expect((p1Ride as any).estimatedFare).toBe(130);
+    expect((p1Ride as any).poolDiscount).toBe(10);
 
     // Passenger view should show shared ride badge and co-passengers
     const activeRes = await request(app)
@@ -131,7 +130,7 @@ describe('Pooling — all cases A–J', () => {
     expect(activeRide.isSharedRide).toBe(true);
     expect(activeRide.coPassengers).toBe(1);
     expect(activeRide.poolDiscountApplied).toBe(true);
-    expect(activeRide.estimatedFare).toBe(100);
+    expect(activeRide.estimatedFare).toBe(130);
     // Driver name should be present
     expect(activeRide.driverName).toBeTruthy();
     // Vehicle should be present
@@ -207,8 +206,8 @@ describe('Pooling — all cases A–J', () => {
     // Both should now have discounted fare
     let p1Ride = await RideRequest.findByPk(r1.body.rideRequest.id);
     let p2Ride = await RideRequest.findByPk(r2.body.rideRequest.id);
-    expect((p1Ride as any).estimatedFare).toBe(100);
-    expect((p2Ride as any).estimatedFare).toBe(100);
+    expect((p1Ride as any).estimatedFare).toBe(130);
+    expect((p2Ride as any).estimatedFare).toBe(130);
 
     // P1 cancels
     const cancelRes = await request(app)
@@ -417,7 +416,7 @@ describe('Pooling — all cases A–J', () => {
   // =========================================================================
   // FARE FORMULA VERIFICATION (explicit numbers)
   // =========================================================================
-  it('Fare formula: Gulshan→Banani solo=৳140, pooled=৳100 (70% of 140, rounded to ৳5)', async () => {
+  it('Fare formula: Gulshan→Banani solo=৳140, pooled=৳130 (100 + 40 × 70% = 128, rounded to ৳5)', async () => {
     const driver = await createDriver('F1');
     const p1 = await createPassenger('F-P1');
     const p2 = await createPassenger('F-P2');
@@ -433,12 +432,12 @@ describe('Pooling — all cases A–J', () => {
     const r2 = await requestRide(app, p2.id, 'Gulshan', 'Banani', 1);
     await acceptRide(app, r2.body.rideRequest.id, driver.id);
 
-    // After pool: 70% of 140 = 98 → ৳100 each, saving ৳40 each
+    // After pool: 100 + 40 × 70% = 128 → ৳130 each, saving ৳10 each
     const p1Final = await RideRequest.findByPk(r1.body.rideRequest.id);
     const p2Final = await RideRequest.findByPk(r2.body.rideRequest.id);
-    expect((p1Final as any).estimatedFare).toBe(100);
-    expect((p2Final as any).estimatedFare).toBe(100);
-    expect((p1Final as any).poolDiscount).toBe(40);
-    expect((p2Final as any).poolDiscount).toBe(40);
+    expect((p1Final as any).estimatedFare).toBe(130);
+    expect((p2Final as any).estimatedFare).toBe(130);
+    expect((p1Final as any).poolDiscount).toBe(10);
+    expect((p2Final as any).poolDiscount).toBe(10);
   });
 });

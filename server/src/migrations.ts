@@ -115,8 +115,8 @@ export async function markFaresInTaka(): Promise<void> {
 /**
  * One-off, idempotent: fares used to be stored as integer paisa (৳140 = 14000). They are now whole
  * taka rounded to the nearest ৳5, so existing rows are divided by 100 and rounded.
- * Rides that are still open (pooled, not started) are then re-priced with the share-rate model;
- * rides that have already STARTED keep their converted, locked fare.
+ * Rides that are still open (pooled, not started) are then re-priced with the current fare model;
+ * rides that have already STARTED have no boarding checkpoint, so they keep their converted fare.
  *
  * The database's `user_version` records that the conversion happened. A brand-new database (no
  * RideRequests table yet) is stamped immediately, because everything written to it is already
@@ -161,7 +161,7 @@ export async function migrateFaresToTaka(): Promise<void> {
 
 /**
  * Idempotent: adds the columns behind mid-trip cancellation to a database created before it existed:
- * `RideRequests.cancellationZone` and `RideEvents.cancellationZone / chargedFare / lockedFare`.
+ * `RideRequests.cancellationZone` and `RideEvents.cancellationZone / chargedFare / fullTripEstimate`.
  * `sequelize.sync()` never adds columns to an existing table. (The status column is plain TEXT in
  * SQLite, so the new CANCELLED_IN_TRANSIT value needs no change.)
  */
@@ -172,8 +172,15 @@ export async function migrateMidTripCancellation(): Promise<void> {
     await sequelize.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${type}`);
     console.log(`[migrate] ${table}: added ${column} column`);
   };
+  const renameColumn = async (table: string, from: string, to: string) => {
+    const [cols] = (await sequelize.query(`PRAGMA table_info(\`${table}\`)`)) as [{ name: string }[], unknown];
+    if (!cols.some((c) => c.name === from)) return;
+    if (cols.some((c) => c.name === to)) await sequelize.query(`ALTER TABLE \`${table}\` DROP COLUMN \`${from}\``);
+    else await sequelize.query(`ALTER TABLE \`${table}\` RENAME COLUMN \`${from}\` TO \`${to}\``);
+  };
   await add('RideRequests', 'cancellationZone', 'TEXT');
   await add('RideEvents', 'cancellationZone', 'VARCHAR(255)');
   await add('RideEvents', 'chargedFare', 'INTEGER');
-  await add('RideEvents', 'lockedFare', 'INTEGER');
+  await renameColumn('RideEvents', 'lockedFare', 'fullTripEstimate'); // an early version of this feature named it lockedFare
+  await add('RideEvents', 'fullTripEstimate', 'INTEGER');
 }

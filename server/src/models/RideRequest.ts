@@ -113,9 +113,10 @@ export class RideRequest extends Model {
 
   /**
    * What this passenger pays — whole taka, a multiple of ৳5.
-   *   estimatedFare = baseFare × share rate (100% alone, 70% with 2 passengers, 55% with 3)
-   * Recalculated whenever pool membership changes (see utils/poolFares.ts), and LOCKED once the
-   * ride is STARTED. A private ride (allowSharing = false) always pays 100%.
+   *   estimatedFare = ৳100 + distance charge × share rate (100% alone, 70% with 2 passengers, 55% with 3)
+   * An ESTIMATE that follows the pool (see utils/poolFares.ts) until the passenger's own journey ends,
+   * when it is settled from the pool's checkpoints and becomes final (COMPLETED / CANCELLED_IN_TRANSIT,
+   * see segmentFare in utils/fareCalculator.ts). A private ride (allowSharing = false) always pays 100%.
    */
   public estimatedFare!: number;
 
@@ -177,7 +178,7 @@ export const initRideRequest = (sequelize: any) => {
         defaultValue: 0,
       },
       estimatedFare: {
-        type: DataTypes.INTEGER, // whole taka — recalculated when the pool changes, locked at STARTED
+        type: DataTypes.INTEGER, // whole taka — an estimate until the journey ends, then final
         allowNull: false,
         defaultValue: 0,
       },

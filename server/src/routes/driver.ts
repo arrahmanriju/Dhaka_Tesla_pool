@@ -2,7 +2,9 @@ import { Router, Request, Response } from 'express';
 import { Op, Transaction } from 'sequelize';
 import { sequelize, User, Vehicle, RideRequest, DriverProfile, RideEvent } from '../models';
 import { validateTransition, RideStatus, TERMINAL_STATUSES } from '../models/RideRequest';
-import { isFareLocked, recalculatePoolFares } from '../utils/poolFares';
+import { isFareFinal, recalculatePoolFares } from '../utils/poolFares';
+import { recordBoarding, recordExit } from '../utils/checkpoints';
+import { settleJourney } from '../utils/journeySettlement';
 import { recordRideEvent, joinedMidTrip } from '../utils/rideEvents';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 
@@ -100,9 +102,16 @@ async function advanceRide(
     return;
   }
 
-  await sequelize.transaction(async (t: any) => {
+  await sequelize.transaction({ type: Transaction.TYPES.IMMEDIATE }, async (t: any) => {
     await RideRequest.update({ status: targetStatus }, { where: { id: rideId }, transaction: t });
     await recordRideEvent(ride, targetStatus, ride.status, { id: driverId, role: 'DRIVER' }, t);
+
+    if (targetStatus === 'STARTED') {
+      // The passenger boards: a checkpoint at their pickup zone (the first of the trip, or a mid-trip
+      // join), then every open fare is re-estimated for the new number of passengers on board.
+      await recordBoarding(ride, t);
+      if (ride.vehicleId) await recalculatePoolFares(ride.vehicleId, t);
+    }
   });
 
   res.json({ message: `Ride status updated to ${targetStatus}.`, rideId, status: targetStatus });
@@ -153,18 +162,34 @@ router.patch('/rides/:id/complete', async (req: Request, res: Response) => {
         { where: { id: rideId, status: 'STARTED' }, transaction: t }
       );
       if (changed === 0) throw new Error('NOT_STARTED');
-      await recordRideEvent(ride, 'COMPLETED', ride.status, { id: driverId, role: 'DRIVER' }, t);
 
-      // Free up the seats on the vehicle
+      // The passenger gets off at their destination: a checkpoint there, then their fare is settled by
+      // walking the checkpoints from where they boarded (segment pricing, see fareCalculator.ts).
+      await recordExit(ride, 'PASSENGER_DROPPED_OFF', ride.destinationZone, t);
+      const settled = await settleJourney(ride, t);
+      await recordRideEvent(ride, 'COMPLETED', ride.status, { id: driverId, role: 'DRIVER' }, t, {
+        chargedFare: settled.bill?.fare ?? ride.estimatedFare,
+        fullTripEstimate: settled.previousEstimate,
+      });
+
+      // Free up the seats on the vehicle, and re-estimate whoever is still on board (one fewer passenger)
       if (ride.vehicleId) {
         await Vehicle.update(
           { occupiedSeats: sequelize.literal(`MAX(0, occupiedSeats - ${ride.seatCount})`) },
           { where: { id: ride.vehicleId }, transaction: t }
         );
+        await recalculatePoolFares(ride.vehicleId, t);
       }
     });
 
-    res.json({ message: 'Ride completed.', rideId, status: 'COMPLETED' });
+    const final = await RideRequest.findByPk(rideId);
+    res.json({
+      message: 'Ride completed.',
+      rideId,
+      status: 'COMPLETED',
+      fare: final?.estimatedFare,
+      poolDiscount: final?.poolDiscount,
+    });
   } catch (error: any) {
     if (error.message === 'NOT_STARTED') {
       res.status(409).json({ error: 'This ride is no longer in progress.' });
@@ -209,8 +234,7 @@ router.patch('/rides/:id/cancel', async (req: Request, res: Response) => {
           { where: { id: ride.vehicleId }, transaction: t }
         );
 
-        // Someone left the pool: re-price everyone still in it (rides already STARTED keep
-        // their locked fare).
+        // Someone left the pool: re-estimate everyone still in it (finished rides are never touched).
         await recalculatePoolFares(ride.vehicleId, t);
       }
     });
@@ -252,7 +276,7 @@ router.get('/rides/active', async (req: Request, res: Response) => {
       baseFare: r.baseFare,
       estimatedFare: r.estimatedFare,
       poolDiscount: r.poolDiscount,
-      fareLocked: isFareLocked(r.status),
+      fareFinal: isFareFinal(r.status),
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
     }));
@@ -374,7 +398,7 @@ router.get('/rides/pool', async (req: Request, res: Response) => {
         status: r.status,
         estimatedFare: r.estimatedFare,
         poolDiscount: r.poolDiscount,
-        fareLocked: isFareLocked(r.status),
+        fareFinal: isFareFinal(r.status),
       })),
     });
   } catch (error) {
@@ -423,8 +447,8 @@ router.get('/rides/timeline', authenticateToken, async (req: AuthenticatedReques
         poolSize: e.poolSize,
         ridersOnboard: e.ridersOnboard,
         joinedMidTrip: joinedMidTrip(e),
-        ...(e.status === 'CANCELLED_IN_TRANSIT'
-          ? { cancellationZone: e.cancellationZone, chargedFare: e.chargedFare, lockedFare: e.lockedFare }
+        ...(e.status === 'CANCELLED_IN_TRANSIT' || e.status === 'COMPLETED'
+          ? { cancellationZone: e.cancellationZone, chargedFare: e.chargedFare, fullTripEstimate: e.fullTripEstimate }
           : {}),
       })),
     });

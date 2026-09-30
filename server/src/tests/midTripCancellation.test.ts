@@ -1,17 +1,29 @@
 /**
- * A passenger leaves a ride AFTER it has started (CANCELLED_IN_TRANSIT).
+ * A passenger leaves a ride AFTER it has started (CANCELLED_IN_TRANSIT). The fare is no longer a
+ * separate pro-rata formula: the cancellation zone is one more checkpoint, and the passenger's
+ * journey is priced by the same segment walk as everyone else's (segmentFares.test.ts has the
+ * pure maths).
  *
- * Worked example (Jashim's Bullet, 3 seats). Nusrat and Rafiq both ride Uttara → Motijheel (18 km):
- *   solo fare        100 + 18 × 20              = ৳460
- *   pool of 2 (70%)  460 × 70% = 322 → nearest 5 = ৳320 each, so the pool discount is 460 − 320 = ৳140
- * Nusrat asks to be dropped at Mirpur (9 km from Uttara) and is charged:
- *   100 + 9 × 20 − 140 = 100 + 180 − 140 = ৳140
- * Rafiq, still on board, keeps his locked ৳320.
+ * Worked example (Jashim's Bullet, 3 seats). Zone distances: Uttara–Mirpur 9 km, Mirpur–Dhanmondi
+ * 7 km, Mirpur–Mohammadpur 5 km, Mohammadpur–Dhanmondi 3 km. Distance charge = km × ৳20.
+ *
+ *   Nusrat rides Uttara → Dhanmondi and starts alone.   checkpoint (Uttara, 1)
+ *   Rafiq boards at Mirpur, going to Dhanmondi.          checkpoint (Mirpur, 2)
+ *   Nusrat asks to be dropped at Mohammadpur.            checkpoint (Mohammadpur, 1)
+ *
+ *   Nusrat:  Uttara → Mirpur        9 km  ৳180  alone (100%)          = ৳180
+ *            Mirpur → Mohammadpur   5 km  ৳100  2 on board (70%)      = ৳70
+ *            fare = 100 + 180 + 70 = ৳350        (on track for ৳380 to Dhanmondi before she left)
+ *   Rafiq, dropped at Dhanmondi:
+ *            Mirpur → Mohammadpur   5 km  ৳100  2 on board (70%)      = ৳70
+ *            Mohammadpur → Dhanmondi 3 km ৳60   alone again (100%)    = ৳60
+ *            fare = 100 + 70 + 60 = ৳230
  */
 import request from 'supertest';
 import { app } from '../index';
-import { sequelize, User, Vehicle, RideRequest, RideEvent } from '../models';
+import { sequelize, User, Vehicle, RideRequest, RideEvent, PoolCheckpoint } from '../models';
 import { asUser } from './helpers';
+import { segmentDistanceKm, shareRatePercent } from '../utils/fareCalculator';
 
 let jashim: any;
 let nusrat: any;
@@ -21,9 +33,10 @@ let tania: any;
 let bullet: any;
 
 type Trip = { pickupZone: string; destinationZone: string; seatCount?: number };
-const UTTARA_TO_MOTIJHEEL: Trip = { pickupZone: 'Uttara', destinationZone: 'Motijheel' };
+const UTTARA_TO_DHANMONDI: Trip = { pickupZone: 'Uttara', destinationZone: 'Dhanmondi' };
+const MIRPUR_TO_DHANMONDI: Trip = { pickupZone: 'Mirpur', destinationZone: 'Dhanmondi' };
 
-const requestRide = (p: any, trip: Trip = UTTARA_TO_MOTIJHEEL) =>
+const requestRide = (p: any, trip: Trip = UTTARA_TO_DHANMONDI) =>
   request(app).post('/ride-requests').set(asUser(p.id)).send({ seatCount: 1, allowSharing: true, ...trip });
 const accept = (rideId: string) => request(app).post(`/ride-requests/${rideId}/accept`).send({ driverId: jashim.id });
 const driverAction = (rideId: string, action: 'arrive' | 'start' | 'complete' | 'cancel') =>
@@ -33,12 +46,14 @@ const leave = (rideId: string, who: any, cancellationZone?: unknown) =>
     .patch(`/passenger/rides/${rideId}/cancel-in-transit`)
     .set(asUser(who.id))
     .send(cancellationZone === undefined ? {} : { cancellationZone });
+const view = (rideId: string, who: any) => request(app).get(`/passenger/rides/${rideId}`).set(asUser(who.id));
 const pending = () => request(app).get(`/ride-requests/pending?driverId=${jashim.id}`);
-const pendingIds = async () => (await pending()).body.requests.map((r: any) => r.id as string);
 const ride = async (id: string) => (await RideRequest.findByPk(id))!;
 const occupied = async () => (await Vehicle.findByPk(bullet.id))!.occupiedSeats;
+const checkpoints = async () =>
+  (await PoolCheckpoint.findAll({ where: { vehicleId: bullet.id }, order: [['id', 'ASC']] })).map((c) => [c.zone, c.passengerCount, c.kind]);
 
-async function joinPool(p: any, trip: Trip = UTTARA_TO_MOTIJHEEL): Promise<string> {
+async function joinPool(p: any, trip: Trip = UTTARA_TO_DHANMONDI): Promise<string> {
   const created = await requestRide(p, trip);
   expect(created.status).toBe(201);
   const id = created.body.rideRequest.id as string;
@@ -50,11 +65,11 @@ async function startRide(id: string) {
   expect((await driverAction(id, 'start')).status).toBe(200);
 }
 
-/** Nusrat and Rafiq are both on board (STARTED, fares locked at ৳320 each). */
-async function twoOnBoard() {
+/** Nusrat starts alone at Uttara; Rafiq is accepted mid-trip and boards at Mirpur. */
+async function nusratThenRafiq() {
   const nusratRide = await joinPool(nusrat);
-  const rafiqRide = await joinPool(rafiq);
   await startRide(nusratRide);
+  const rafiqRide = await joinPool(rafiq, MIRPUR_TO_DHANMONDI);
   await startRide(rafiqRide);
   return { nusratRide, rafiqRide };
 }
@@ -66,7 +81,7 @@ afterAll(async () => {
   await sequelize.close();
 });
 
-describe('Mid-trip cancellation — CANCELLED_IN_TRANSIT', () => {
+describe('Mid-trip cancellation — CANCELLED_IN_TRANSIT priced from checkpoints', () => {
   beforeEach(async () => {
     const mk = async (name: string, role: 'DRIVER' | 'PASSENGER', n: number) =>
       (await User.create({ name: `${name} Test`, phone: `0171300000${n}`, email: `${name.toLowerCase()}-ct@test.com`, password: 'x', role })).toJSON();
@@ -78,6 +93,7 @@ describe('Mid-trip cancellation — CANCELLED_IN_TRANSIT', () => {
     bullet = (await Vehicle.create({ driverId: jashim.id, modelName: 'Bullet', seatCapacity: 3, licensePlate: 'DTP-0001' })).toJSON();
   });
   afterEach(async () => {
+    await PoolCheckpoint.destroy({ where: {} });
     await RideEvent.destroy({ where: {} });
     await RideRequest.destroy({ where: {} });
     await Vehicle.destroy({ where: {} });
@@ -85,102 +101,106 @@ describe('Mid-trip cancellation — CANCELLED_IN_TRANSIT', () => {
   });
 
   // ─────────────────────────── the fare ───────────────────────────
-  describe('the pro-rated fare', () => {
-    it('worked example: Nusrat leaves at Mirpur and is charged ৳140 (100 + 9×20 − 140)', async () => {
-      const { nusratRide } = await twoOnBoard();
-      expect((await ride(nusratRide)).estimatedFare).toBe(320);
-      expect((await ride(nusratRide)).poolDiscount).toBe(140);
+  describe('the fare comes from the segments actually travelled', () => {
+    it('worked example: Nusrat leaves at Mohammadpur and pays ৳350, not the ৳380 she was on track for', async () => {
+      const { nusratRide } = await nusratThenRafiq();
+      // Before she leaves: Uttara → Mirpur alone (180) + Mirpur → Dhanmondi with 2 on board (98) → 100 + 278 = 378 → ৳380
+      expect((await ride(nusratRide)).estimatedFare).toBe(380);
 
-      const res = await leave(nusratRide, nusrat, 'Mirpur');
+      const res = await leave(nusratRide, nusrat, 'Mohammadpur');
 
       expect(res.status).toBe(200);
-      expect(res.body.status).toBe('CANCELLED_IN_TRANSIT');
-      expect(res.body.cancellationZone).toBe('Mirpur');
-      expect(res.body.fare).toEqual({
-        baseCharge: 100,
-        distanceKm: 9,
-        distanceCharge: 180,
-        grossFare: 280,
-        poolDiscount: 140,
-        fare: 140,
-        limited: false,
-        lockedFare: 320,
-      });
-      const saved = await ride(nusratRide);
-      expect(saved).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', cancellationZone: 'Mirpur', estimatedFare: 140, poolDiscount: 140, baseFare: 460 });
+      expect(res.body).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', cancellationZone: 'Mohammadpur' });
+      expect(res.body.fare).toMatchObject({ baseCharge: 100, distanceTotal: 280, soloFare: 380, poolDiscount: 30, fare: 350, fullTripEstimate: 380 });
+      expect(res.body.fare.segments).toEqual([
+        { distanceKm: 9, distanceCharge: 180, passengers: 1, ratePercent: 100, charge: 180 },
+        { distanceKm: 5, distanceCharge: 100, passengers: 2, ratePercent: 70, charge: 70 },
+      ]);
+      expect(await ride(nusratRide)).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', cancellationZone: 'Mohammadpur', estimatedFare: 350, poolDiscount: 30 });
+      expect(await checkpoints()).toEqual([
+        ['Uttara', 1, 'TRIP_STARTED'],
+        ['Mirpur', 2, 'PASSENGER_JOINED'],
+        ['Mohammadpur', 1, 'PASSENGER_LEFT'],
+      ]);
     });
 
-    it('a passenger riding alone (no discount) pays the plain fare for the part travelled', async () => {
+    it('the passengers who stay are priced only for their own segments: Rafiq pays ৳230', async () => {
+      const { nusratRide, rafiqRide } = await nusratThenRafiq();
+      await leave(nusratRide, nusrat, 'Mohammadpur');
+      expect((await driverAction(rafiqRide, 'complete')).status).toBe(200);
+
+      const final = await ride(rafiqRide);
+      expect(final).toMatchObject({ status: 'COMPLETED', estimatedFare: 230 });
+      const bill = (await view(rafiqRide, rafiq)).body.ride.fareBreakdown;
+      expect(bill.segments).toEqual([
+        { distanceKm: 5, distanceCharge: 100, passengers: 2, ratePercent: 70, charge: 70 },
+        { distanceKm: 3, distanceCharge: 60, passengers: 1, ratePercent: 100, charge: 60 },
+      ]);
+      expect(bill).toMatchObject({ final: true, fare: 230 });
+      // between them they paid for every stretch exactly once per passenger on it: ৳350 + ৳230
+      expect((await ride(nusratRide)).estimatedFare + final.estimatedFare).toBe(580);
+    });
+
+    it('a passenger riding alone pays the plain fare for the part travelled', async () => {
       const nusratRide = await joinPool(nusrat);
-      await startRide(nusratRide); // alone: locked ৳460, discount 0
+      await startRide(nusratRide);
+      expect((await ride(nusratRide)).estimatedFare).toBe(420); // 100 + 16 × 20 to Dhanmondi
+
       const res = await leave(nusratRide, nusrat, 'Mirpur');
-      expect(res.body.fare).toMatchObject({ grossFare: 280, poolDiscount: 0, fare: 280, lockedFare: 460 });
+      // Uttara → Mirpur alone: 100 + 9 × 20 = ৳280
+      expect(res.body.fare).toMatchObject({ fare: 280, poolDiscount: 0, fullTripEstimate: 420 });
+      expect(res.body.fare.segments).toEqual([{ distanceKm: 9, distanceCharge: 180, passengers: 1, ratePercent: 100, charge: 180 }]);
     });
 
-    it('the fare cannot exceed what was locked for the whole trip', async () => {
-      // Mohakhali → Badda (৳180 locked); Uttara is 11 km from Mohakhali (৳320), but the charge is capped at ৳180.
-      const id = await joinPool(nusrat, { pickupZone: 'Mohakhali', destinationZone: 'Badda' });
-      await startRide(id);
-      const res = await leave(id, nusrat, 'Uttara');
-      expect(res.body.fare).toMatchObject({ grossFare: 320, fare: 180, limited: true });
+    it('leaving at the very zone where someone boards adds a 0 km stretch that costs nothing', async () => {
+      const { nusratRide, rafiqRide } = await nusratThenRafiq();
+      const res = await leave(nusratRide, nusrat, 'Mirpur');
+      // Uttara → Mirpur alone (180); Mirpur → Mirpur is 0 km: 100 + 180 = ৳280, no pool discount earned
+      expect(res.body.fare).toMatchObject({ fare: 280, poolDiscount: 0 });
+      expect(res.body.fare.segments[1]).toMatchObject({ distanceKm: 0, charge: 0 });
+
+      await driverAction(rafiqRide, 'complete');
+      // Rafiq: the 0 km stretch with 2 on board, then Mirpur → Dhanmondi alone (140): 100 + 140 = ৳240
+      expect((await ride(rafiqRide)).estimatedFare).toBe(240);
+    });
+
+    it('is not a locked estimate: passengers still on board are re-estimated for who is left', async () => {
+      const { nusratRide, rafiqRide } = await nusratThenRafiq();
+      // Rafiq, on board with Nusrat: Mirpur → Dhanmondi at 70% → 100 + 98 = 198 → ৳200
+      expect((await ride(rafiqRide)).estimatedFare).toBe(200);
+      await leave(nusratRide, nusrat, 'Mohammadpur');
+      // Now he is alone from Mohammadpur: 70 (Mirpur → Mohammadpur, shared) + 60 = ৳230 if he rides on to Dhanmondi
+      const r = await ride(rafiqRide);
+      expect(r.status).toBe('STARTED');
+      expect(r.estimatedFare).toBe(230);
     });
   });
 
   // ─────────────────────────── status, other passengers, seat ───────────────────────────
   describe('what changes and what does not', () => {
-    it('Nusrat becomes CANCELLED_IN_TRANSIT; Rafiq and a co-passenger who has not started keep their fares', async () => {
-      const { nusratRide, rafiqRide } = await twoOnBoard();
-      // Shirin joins mid-trip (pool of 3 → 55% of ৳460 = 253 → ৳255) and has not started yet
-      const shirinRide = await joinPool(shirin);
-      expect((await ride(shirinRide)).estimatedFare).toBe(255);
-      expect((await ride(rafiqRide)).estimatedFare).toBe(320); // locked
-
-      expect((await leave(nusratRide, nusrat, 'Mirpur')).status).toBe(200);
-
-      expect((await ride(nusratRide)).status).toBe('CANCELLED_IN_TRANSIT');
-      const rafiqAfter = await ride(rafiqRide);
-      expect(rafiqAfter).toMatchObject({ status: 'STARTED', estimatedFare: 320, poolDiscount: 140 });
-      // Not re-priced to the pool-of-2 rate: a co-passenger leaving mid-route never changes what others owe.
-      const shirinAfter = await ride(shirinRide);
-      expect(shirinAfter).toMatchObject({ status: 'MATCHED', estimatedFare: 255 });
-    });
-
-    it('the seat is released at once: capacity goes up and a request that did not fit now shows in the pending filter', async () => {
-      const { nusratRide } = await twoOnBoard();
-      await joinPool(shirin); // 3 of 3 seats
+    it('the freed seat shows in capacity and in the route-filtered pending list at once', async () => {
+      const { nusratRide } = await nusratThenRafiq();
+      await joinPool(shirin, MIRPUR_TO_DHANMONDI); // 3 of 3 seats
       expect(await occupied()).toBe(3);
 
-      const late = await requestRide(tania);
+      const late = await requestRide(tania, MIRPUR_TO_DHANMONDI);
       expect((await pending()).body.availableSeats).toBe(0);
-      expect(await pendingIds()).not.toContain(late.body.rideRequest.id);
+      expect((await pending()).body.requests.map((r: any) => r.id)).not.toContain(late.body.rideRequest.id);
 
-      await leave(nusratRide, nusrat, 'Mirpur');
+      await leave(nusratRide, nusrat, 'Mohammadpur');
 
       expect(await occupied()).toBe(2);
       const after = await pending();
       expect(after.body.availableSeats).toBe(1);
       expect(after.body.midTrip).toBe(true);
       expect(after.body.requests.map((r: any) => r.id)).toContain(late.body.rideRequest.id);
-      // ...and it can be accepted straight away, with no re-match cycle
-      expect((await accept(late.body.rideRequest.id)).status).toBe(200);
+      expect((await accept(late.body.rideRequest.id)).status).toBe(200); // no re-match cycle
       expect(await occupied()).toBe(3);
     });
 
-    it('the vehicle stays subject to the route filter after the seat is freed', async () => {
-      const { nusratRide } = await twoOnBoard();
-      const fits = await requestRide(tania); // Uttara → Motijheel, the way Rafiq is still riding
-      const opposite = await requestRide(shirin, { pickupZone: 'Motijheel', destinationZone: 'Uttara' }); // wrong way
-      await leave(nusratRide, nusrat, 'Mirpur');
-      const after = await pending();
-      expect(after.body.midTrip).toBe(true); // Rafiq is still on board, so the strict trip-under-way rule applies
-      const ids = after.body.requests.map((r: any) => r.id);
-      expect(ids).toContain(fits.body.rideRequest.id);
-      expect(ids).not.toContain(opposite.body.rideRequest.id);
-    });
-
     it('the passenger can book again straight after leaving', async () => {
-      const { nusratRide } = await twoOnBoard();
-      await leave(nusratRide, nusrat, 'Mirpur');
+      const { nusratRide } = await nusratThenRafiq();
+      await leave(nusratRide, nusrat, 'Mohammadpur');
       expect((await requestRide(nusrat)).status).toBe(201);
     });
   });
@@ -188,79 +208,82 @@ describe('Mid-trip cancellation — CANCELLED_IN_TRANSIT', () => {
   // ─────────────────────────── who and when ───────────────────────────
   describe('who may cancel, and when', () => {
     it('a passenger cannot cancel someone else’s leg', async () => {
-      const { nusratRide } = await twoOnBoard();
+      const { nusratRide } = await nusratThenRafiq();
 
-      expect((await leave(nusratRide, rafiq, 'Mirpur')).status).toBe(403);
-      expect((await leave(nusratRide, shirin, 'Mirpur')).status).toBe(403);
-      expect((await request(app).patch(`/passenger/rides/${nusratRide}/cancel-in-transit`).send({ cancellationZone: 'Mirpur' })).status).toBe(401);
-      // a driver's login is refused
+      expect((await leave(nusratRide, rafiq, 'Mohammadpur')).status).toBe(403);
+      expect((await leave(nusratRide, shirin, 'Mohammadpur')).status).toBe(403);
+      expect((await request(app).patch(`/passenger/rides/${nusratRide}/cancel-in-transit`).send({ cancellationZone: 'Mohammadpur' })).status).toBe(401);
       const asDriver = await request(app)
         .patch(`/passenger/rides/${nusratRide}/cancel-in-transit`)
         .set(asUser(jashim.id, 'DRIVER'))
-        .send({ cancellationZone: 'Mirpur' });
+        .send({ cancellationZone: 'Mohammadpur' });
       expect(asDriver.status).toBe(403);
-      // a forged passengerId is refused too
       const forged = await request(app)
         .patch(`/passenger/rides/${nusratRide}/cancel-in-transit`)
         .set(asUser(rafiq.id))
-        .send({ passengerId: nusrat.id, cancellationZone: 'Mirpur' });
+        .send({ passengerId: nusrat.id, cancellationZone: 'Mohammadpur' });
       expect(forged.status).toBe(403);
 
-      expect(await ride(nusratRide)).toMatchObject({ status: 'STARTED', estimatedFare: 320, cancellationZone: null });
+      expect(await ride(nusratRide)).toMatchObject({ status: 'STARTED', cancellationZone: null });
       expect(await occupied()).toBe(2);
-      expect((await leave('00000000-0000-4000-8000-000000000000', nusrat, 'Mirpur')).status).toBe(404);
+      expect(await checkpoints()).toHaveLength(2); // nothing was recorded
+      expect((await leave('00000000-0000-4000-8000-000000000000', nusrat, 'Mohammadpur')).status).toBe(404);
     });
 
     it('is not reachable once the ride is COMPLETED, or before it has started', async () => {
-      const { nusratRide } = await twoOnBoard();
+      const { nusratRide } = await nusratThenRafiq();
       await driverAction(nusratRide, 'complete');
-      const res = await leave(nusratRide, nusrat, 'Mirpur');
+      const fareAtCompletion = (await ride(nusratRide)).estimatedFare;
+      const res = await leave(nusratRide, nusrat, 'Mohammadpur');
       expect(res.status).toBe(409);
       expect(res.body.error).toMatch(/completed/i);
-      expect(await ride(nusratRide)).toMatchObject({ status: 'COMPLETED', estimatedFare: 320, cancellationZone: null });
+      expect(await ride(nusratRide)).toMatchObject({ status: 'COMPLETED', estimatedFare: fareAtCompletion, cancellationZone: null });
       expect(await occupied()).toBe(1); // only the completion released Nusrat's seat, once
 
-      // before the start: MATCHED and REQUESTED rides use the ordinary cancel, not this path
-      const matched = await joinPool(shirin);
-      expect((await leave(matched, shirin, 'Mirpur')).status).toBe(409);
+      const matched = await joinPool(shirin, MIRPUR_TO_DHANMONDI);
+      expect((await leave(matched, shirin, 'Mohammadpur')).status).toBe(409);
       const requested = await requestRide(tania);
-      expect((await leave(requested.body.rideRequest.id, tania, 'Mirpur')).status).toBe(409);
+      expect((await leave(requested.body.rideRequest.id, tania, 'Mohammadpur')).status).toBe(409);
       expect((await ride(matched)).status).toBe('MATCHED');
     });
 
     it('cannot be done twice', async () => {
-      const { nusratRide } = await twoOnBoard();
-      expect((await leave(nusratRide, nusrat, 'Mirpur')).status).toBe(200);
-      expect((await leave(nusratRide, nusrat, 'Mirpur')).status).toBe(409);
+      const { nusratRide } = await nusratThenRafiq();
+      expect((await leave(nusratRide, nusrat, 'Mohammadpur')).status).toBe(200);
+      expect((await leave(nusratRide, nusrat, 'Mohammadpur')).status).toBe(409);
       expect(await occupied()).toBe(1); // released once
+      expect((await checkpoints()).filter((c) => c[2] === 'PASSENGER_LEFT')).toHaveLength(1);
     });
 
-    it('the driver completing at the same moment cannot double-release the seat', async () => {
-      const { nusratRide } = await twoOnBoard();
-      const [a, b] = await Promise.all([leave(nusratRide, nusrat, 'Mirpur'), driverAction(nusratRide, 'complete')]);
+    it('the driver completing at the same moment cannot double-release the seat or double-record the exit', async () => {
+      const { nusratRide } = await nusratThenRafiq();
+      const [a, b] = await Promise.all([leave(nusratRide, nusrat, 'Mohammadpur'), driverAction(nusratRide, 'complete')]);
       const final = (await ride(nusratRide)).status;
       expect(['COMPLETED', 'CANCELLED_IN_TRANSIT']).toContain(final);
       expect([a.status, b.status].filter((s) => s === 200)).toHaveLength(1); // exactly one won
       expect(await occupied()).toBe(1);
+      const exits = (await checkpoints()).filter((c) => c[2] === 'PASSENGER_LEFT' || c[2] === 'PASSENGER_DROPPED_OFF');
+      expect(exits).toHaveLength(1);
     });
 
     it('needs a valid cancellation zone that is neither the pickup nor the destination', async () => {
-      const { nusratRide } = await twoOnBoard();
-      for (const bad of [undefined, '', 'Narnia', 42, 'Uttara', 'Motijheel']) {
+      const { nusratRide } = await nusratThenRafiq();
+      for (const bad of [undefined, '', 'Narnia', 42, 'Uttara', 'Dhanmondi']) {
         const res = await leave(nusratRide, nusrat, bad);
         expect(res.status).toBe(400);
         expect(res.body.fields.cancellationZone).toBeTruthy();
       }
-      expect(await ride(nusratRide)).toMatchObject({ status: 'STARTED', estimatedFare: 320 });
+      expect(await ride(nusratRide)).toMatchObject({ status: 'STARTED' });
       expect(await occupied()).toBe(2);
+      expect(await checkpoints()).toHaveLength(2);
     });
   });
 
   // ─────────────────────────── audit trail ───────────────────────────
   describe('audit trail', () => {
     it('the pool history shows who left, when, where and what they were charged, beside the others’ records', async () => {
-      const { nusratRide, rafiqRide } = await twoOnBoard();
-      await leave(nusratRide, nusrat, 'Mirpur');
+      const { nusratRide, rafiqRide } = await nusratThenRafiq();
+      await leave(nusratRide, nusrat, 'Mohammadpur');
 
       const res = await request(app).get('/driver/rides/timeline').set(asUser(jashim.id, 'DRIVER'));
       const events: any[] = res.body.events;
@@ -272,45 +295,86 @@ describe('Mid-trip cancellation — CANCELLED_IN_TRANSIT', () => {
         passengerFirstName: 'Nusrat',
         status: 'CANCELLED_IN_TRANSIT',
         fromStatus: 'STARTED',
-        cancellationZone: 'Mirpur',
-        chargedFare: 140,
-        lockedFare: 320,
+        cancellationZone: 'Mohammadpur',
+        chargedFare: 350,
+        fullTripEstimate: 380,
       });
       expect(left.at).toBeTruthy();
-      // Rafiq's record is untouched
       expect(of(rafiqRide).map((e) => e.status)).toEqual(['REQUESTED', 'MATCHED', 'DRIVER_ARRIVED', 'STARTED']);
 
-      // who cancelled: stored on the event
       const stored = await RideEvent.findOne({ where: { rideRequestId: nusratRide, status: 'CANCELLED_IN_TRANSIT' } });
-      expect(stored).toMatchObject({ actorId: nusrat.id, actorRole: 'PASSENGER', poolSize: 1, cancellationZone: 'Mirpur', chargedFare: 140 });
+      expect(stored).toMatchObject({ actorId: nusrat.id, actorRole: 'PASSENGER', poolSize: 1, cancellationZone: 'Mohammadpur', chargedFare: 350, fullTripEstimate: 380 });
     });
 
-    it('the cancelling passenger sees the outcome in their own history, and nobody else sees it', async () => {
-      const { nusratRide, rafiqRide } = await twoOnBoard();
-      await leave(nusratRide, nusrat, 'Mirpur');
+    it('the cancelling passenger sees their own outcome; nobody else sees it, or the stretches where others boarded', async () => {
+      const { nusratRide, rafiqRide } = await nusratThenRafiq();
+      await leave(nusratRide, nusrat, 'Mohammadpur');
 
       expect((await request(app).get('/passenger/rides/active').set(asUser(nusrat.id))).body.rides).toHaveLength(0);
       const history = (await request(app).get('/passenger/rides/history').set(asUser(nusrat.id))).body.rides;
-      expect(history).toHaveLength(1);
-      expect(history[0]).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', cancellationZone: 'Mirpur', estimatedFare: 140 });
-      expect(history[0].timeline.at(-1)).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', cancellationZone: 'Mirpur', chargedFare: 140, lockedFare: 320 });
+      expect(history[0]).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', cancellationZone: 'Mohammadpur', estimatedFare: 350 });
+      expect(history[0].timeline.at(-1)).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', cancellationZone: 'Mohammadpur', chargedFare: 350, fullTripEstimate: 380 });
 
-      // Rafiq sees his own ride only: still STARTED at ৳320, nothing of Nusrat's zone or charge
-      const rafiqView = await request(app).get(`/passenger/rides/${rafiqRide}`).set(asUser(rafiq.id));
-      expect(rafiqView.body.ride).toMatchObject({ status: 'STARTED', estimatedFare: 320, fareLocked: true, canCancelInTransit: true });
-      expect(rafiqView.body.ride.pool.otherPassengers).toEqual([]);
+      // Her own breakdown has no zone names: the middle checkpoint is where ANOTHER passenger boarded
+      const mine = (await view(nusratRide, nusrat)).body.ride;
+      expect(mine.fareBreakdown).toMatchObject({ final: true, fare: 350 });
+      expect(JSON.stringify(mine.fareBreakdown)).not.toMatch(/Mirpur|fromZone|toZone/);
+
+      // Rafiq sees his own ride only: still on board, nothing of Nusrat's zone or charge
+      const rafiqView = await view(rafiqRide, rafiq);
       const text = JSON.stringify(rafiqView.body);
-      expect(text).not.toContain('Mirpur');
+      expect(rafiqView.body.ride).toMatchObject({ status: 'STARTED', canCancelInTransit: true });
+      expect(rafiqView.body.ride.pool.otherPassengers).toEqual([]);
       expect(text).not.toContain('CANCELLED_IN_TRANSIT');
+      expect(text).not.toContain('Mohammadpur');
       expect(text).not.toContain(nusrat.id);
     });
 
     it('the driver’s ride history lists the part-trip', async () => {
-      const { nusratRide } = await twoOnBoard();
-      await leave(nusratRide, nusrat, 'Mirpur');
+      const { nusratRide } = await nusratThenRafiq();
+      await leave(nusratRide, nusrat, 'Mohammadpur');
       const res = await request(app).get(`/driver/rides/history?driverId=${jashim.id}`);
       const row = res.body.rides.find((r: any) => r.id === nusratRide);
-      expect(row).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', cancellationZone: 'Mirpur', estimatedFare: 140 });
+      expect(row).toMatchObject({ status: 'CANCELLED_IN_TRANSIT', cancellationZone: 'Mohammadpur', estimatedFare: 350 });
+    });
+  });
+
+  // ─────────────────────────── revenue ───────────────────────────
+  describe('revenue reconciles', () => {
+    it('every stretch is charged once per passenger on board: the segments account for every taka', async () => {
+      const { nusratRide, rafiqRide } = await nusratThenRafiq();
+      const shirinRide = await joinPool(shirin, MIRPUR_TO_DHANMONDI);
+      await startRide(shirinRide); // 3 on board from Mirpur
+      await leave(nusratRide, nusrat, 'Mohammadpur');
+      await driverAction(rafiqRide, 'complete');
+      await driverAction(shirinRide, 'complete');
+
+      const rides = [nusratRide, rafiqRide, shirinRide];
+      const bills = [];
+      for (const [id, who] of [[nusratRide, nusrat], [rafiqRide, rafiq], [shirinRide, shirin]] as const) {
+        const b = (await view(id, who)).body.ride.fareBreakdown;
+        expect(b.final).toBe(true);
+        bills.push(b);
+      }
+
+      // What the checkpoints say was on the road: for every stretch between two checkpoints, km × ৳20 × rate × people on board
+      const cps = await PoolCheckpoint.findAll({ where: { vehicleId: bullet.id }, order: [['id', 'ASC']] });
+      let expectedCharges = 0;
+      for (let i = 0; i + 1 < cps.length; i++) {
+        const c = cps[i]!;
+        const km = segmentDistanceKm(c.zone, cps[i + 1]!.zone);
+        expectedCharges += (km * 20 * shareRatePercent(c.passengerCount) * c.passengerCount) / 100;
+      }
+      const chargedSegments = bills.flatMap((b) => b.segments).reduce((s: number, x: any) => s + x.charge, 0);
+      expect(chargedSegments).toBe(expectedCharges); // nothing double-counted, nothing dropped
+
+      // and the fares are those charges plus one ৳100 base fare each, each rounded to the nearest ৳5
+      const fares = await Promise.all(rides.map(async (id) => (await ride(id)).estimatedFare));
+      const exact = 3 * 100 + chargedSegments;
+      expect(Math.abs(fares.reduce((a, b) => a + b, 0) - exact)).toBeLessThanOrEqual(3 * 2.5);
+      // Nusrat: 100 + 180 (alone) + 55 (Mirpur → Mohammadpur, 3 on board: 100 × 55%) = 335.
+      // Rafiq and Shirin: 100 + 55 + 42 (Mohammadpur → Dhanmondi, 2 left: 60 × 70%) = 197 → 195 each.
+      expect(fares).toEqual([335, 195, 195]);
     });
   });
 });

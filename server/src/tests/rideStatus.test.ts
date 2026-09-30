@@ -173,11 +173,11 @@ describe('pool info', () => {
     expect(Object.keys(pool).sort()).toEqual(['isShared', 'otherPassengers', 'poolSize', 'seatCapacity', 'seatsTaken']);
   });
 
-  it('Nusrat sees only her own fare: ৳125 (saves ৳55), and Rafiq sees his own', async () => {
+  it('Nusrat sees only her own fare: ৳155 (saves ৳25), and Rafiq sees his own', async () => {
     const nusratRide = await bookAndAccept(nusrat);
     const rafiqRide = await bookAndAccept(rafiq);
-    expect((await view(nusratRide, nusrat)).body.ride).toMatchObject({ estimatedFare: 125, poolDiscount: 55, baseFare: 180 });
-    expect((await view(rafiqRide, rafiq)).body.ride).toMatchObject({ estimatedFare: 125, poolDiscount: 55 });
+    expect((await view(nusratRide, nusrat)).body.ride).toMatchObject({ estimatedFare: 155, poolDiscount: 25, baseFare: 180 });
+    expect((await view(rafiqRide, rafiq)).body.ride).toMatchObject({ estimatedFare: 155, poolDiscount: 25 });
   });
 
   it('with three passengers the two others are listed by first name', async () => {
@@ -221,19 +221,19 @@ describe('ride status, fare and actions', () => {
   it('walks Matched → Driver Arrived → Started → Completed, with cancel allowed only before the driver arrives', async () => {
     const id = await bookAndAccept(nusrat);
     let ride = (await view(id, nusrat)).body.ride;
-    expect(ride).toMatchObject({ status: 'MATCHED', canCancel: true, fareLocked: false });
+    expect(ride).toMatchObject({ status: 'MATCHED', canCancel: true, fareFinal: false });
 
     await driverAction(id, 'arrive');
     ride = (await view(id, nusrat)).body.ride;
-    expect(ride).toMatchObject({ status: 'DRIVER_ARRIVED', canCancel: false, fareLocked: false });
+    expect(ride).toMatchObject({ status: 'DRIVER_ARRIVED', canCancel: false, fareFinal: false });
 
     await driverAction(id, 'start');
     ride = (await view(id, nusrat)).body.ride;
-    expect(ride).toMatchObject({ status: 'STARTED', canCancel: false, fareLocked: true });
+    expect(ride).toMatchObject({ status: 'STARTED', canCancel: false, fareFinal: false });
 
     await driverAction(id, 'complete');
     ride = (await view(id, nusrat)).body.ride;
-    expect(ride).toMatchObject({ status: 'COMPLETED', canCancel: false, fareLocked: true, pool: null });
+    expect(ride).toMatchObject({ status: 'COMPLETED', canCancel: false, fareFinal: true, pool: null });
   });
 
   it('a CANCELLED ride reports it clearly, with no pool and no phone', async () => {

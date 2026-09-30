@@ -10,8 +10,9 @@ import { RideStatus, RIDE_STATUS_VALUES } from './RideRequest';
  *   poolSize        rides on the vehicle that are not finished, right after the change (0 before matching)
  *   ridersOnboard   rides on the vehicle that are STARTED (already travelling), not counting this one.
  *                   A MATCHED event with ridersOnboard > 0 is a passenger who joined mid-trip.
- *   cancellationZone, chargedFare, lockedFare   only on CANCELLED_IN_TRANSIT: where the passenger left,
- *                   the pro-rated fare they were charged, and the fare that had been locked for the full trip.
+ *   cancellationZone, chargedFare, fullTripEstimate   chargedFare and fullTripEstimate are on COMPLETED and
+ *                   CANCELLED_IN_TRANSIT; cancellationZone only on the latter: where the passenger left,
+ *                   the final segment fare they were charged, and the estimate they were on track for to their original destination.
  */
 export class RideEvent extends Model {
   declare id: number;
@@ -26,7 +27,7 @@ export class RideEvent extends Model {
   declare ridersOnboard: number;
   declare cancellationZone: string | null;
   declare chargedFare: number | null;
-  declare lockedFare: number | null;
+  declare fullTripEstimate: number | null;
   declare readonly createdAt: Date;
 }
 
@@ -46,7 +47,7 @@ export const initRideEvent = (sequelize: any) => {
       ridersOnboard: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
       cancellationZone: { type: DataTypes.STRING, allowNull: true },
       chargedFare: { type: DataTypes.INTEGER, allowNull: true },
-      lockedFare: { type: DataTypes.INTEGER, allowNull: true },
+      fullTripEstimate: { type: DataTypes.INTEGER, allowNull: true },
     },
     { sequelize, tableName: 'RideEvents', updatedAt: false }
   );

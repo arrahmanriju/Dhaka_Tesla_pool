@@ -5,10 +5,10 @@
  *   Nusrat: Banani → Mohakhali,  1 seat, sharing on
  *   Rafiq:  Banani → Gulshan 1,  1 seat, sharing on
  *
- * Fare arithmetic (base = 100 + km × 20 × seats; pooled = base × 70% with 2, × 55% with 3,
- * rounded to the nearest ৳5):
- *   Banani → Mohakhali  2 km → base ৳140 · with 2: ৳100 · with 3: ৳75
- *   Banani → Gulshan 1  3 km → base ৳160 · with 2: ৳110 · with 3: ৳90
+ * Fare arithmetic (fare = 100 + km × 20 × seats × share rate, share rate 70% with 2 passengers and
+ * 55% with 3, rounded to the nearest ৳5):
+ *   Banani → Mohakhali  2 km → solo ৳140 · with 2: 100 + 28 = ৳130 · with 3: 100 + 22 = ৳120
+ *   Banani → Gulshan 1  3 km → solo ৳160 · with 2: 100 + 42 = ৳140 · with 3: 100 + 33 = ৳135
  */
 import request from 'supertest';
 import { app } from '../index';
@@ -89,10 +89,10 @@ describe('Request ride', () => {
       expect(est.body).toMatchObject({
         baseFare: 140,
         fare: 140,
-        poolFare: 100,
+        poolFare: 130,
         tiers: [
-          { passengers: 2, ratePercent: 70, fare: 100 },
-          { passengers: 3, ratePercent: 55, fare: 75 },
+          { passengers: 2, ratePercent: 70, fare: 130 },
+          { passengers: 3, ratePercent: 55, fare: 120 },
         ],
       });
     });
@@ -111,7 +111,7 @@ describe('Request ride', () => {
 
     it('sharing defaults to on when omitted', async () => {
       const est = await estimate(nusrat, { pickupZone: 'Banani', destinationZone: 'Mohakhali', seatCount: 1 });
-      expect(est.body.poolFare).toBe(100);
+      expect(est.body.poolFare).toBe(130);
     });
 
     it('rejects the same invalid input as the create endpoint', async () => {
@@ -266,7 +266,7 @@ describe('Request ride', () => {
       const b = await requestRide(rafiq, { ...NUSRAT_RIDE });
       expect((await accept(a.body.rideRequest.id)).status).toBe(200);
       expect((await accept(b.body.rideRequest.id)).status).toBe(200);
-      expect((await RideRequest.findByPk(a.body.rideRequest.id))!.estimatedFare).toBe(100); // 70% of ৳140
+      expect((await RideRequest.findByPk(a.body.rideRequest.id))!.estimatedFare).toBe(130); // 100 + 40 × 70% = 128 → 130
     });
 
     it('a private request cannot join a vehicle that already has a passenger', async () => {

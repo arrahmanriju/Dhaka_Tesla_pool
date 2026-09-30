@@ -10,7 +10,7 @@ import {
   TERMINAL_STATUSES,
 } from '../models/RideRequest';
 import { calculateBaseFare, estimateFare, shareRatePercent } from '../utils/fareCalculator';
-import { isFareLocked, recalculatePoolFares } from '../utils/poolFares';
+import { isFareFinal, recalculatePoolFares } from '../utils/poolFares';
 import { checkPoolJoin, loadPool, PoolVerdict } from '../utils/pooling';
 import { recordRideEvent } from '../utils/rideEvents';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
@@ -35,8 +35,9 @@ function formatRide(r: any) {
     baseFare: r.baseFare,
     estimatedFare: r.estimatedFare,
     poolDiscount: r.poolDiscount,
-    // true once the trip has started: the fare can no longer change
-    fareLocked: isFareLocked(r.status),
+    // true once the passenger's own journey has ended (COMPLETED or CANCELLED_IN_TRANSIT): only then is
+    // estimatedFare the final amount. Until then it is an estimate that follows the pool.
+    fareFinal: isFareFinal(r.status),
     status: r.status,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
@@ -394,8 +395,8 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
 
       // ── STEP 4: Recalculate pool fares ──────────────────────────────────
       // Now that this ride is MATCHED (vehicleId is set), the pool has grown. Everyone who has not
-      // started is re-priced from their own base fare (70% each for 2 passengers, 55% for 3);
-      // rides that have already STARTED keep their locked fare.
+      // started is re-estimated (100 + distance charge x share rate for the pool); rides that are on
+      // board are re-estimated from the pool's checkpoints. Only finished rides are settled and final.
       await recalculatePoolFares(vehicle.id, t);
 
       // ── STEP 5: History. `ridersOnboard` > 0 on this event means the passenger joined mid-trip. ──

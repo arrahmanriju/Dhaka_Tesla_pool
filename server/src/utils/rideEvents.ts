@@ -12,7 +12,7 @@ export async function recordRideEvent(
   fromStatus: RideStatus | null,
   actor: { id: string; role: 'PASSENGER' | 'DRIVER' } | null,
   transaction: Transaction | null = null,
-  details: { cancellationZone?: string; chargedFare?: number; lockedFare?: number } = {}
+  details: { cancellationZone?: string; chargedFare?: number; fullTripEstimate?: number } = {}
 ): Promise<void> {
   let poolSize = 0;
   let ridersOnboard = 0;
@@ -39,7 +39,7 @@ export async function recordRideEvent(
       ridersOnboard,
       cancellationZone: details.cancellationZone ?? null,
       chargedFare: details.chargedFare ?? null,
-      lockedFare: details.lockedFare ?? null,
+      fullTripEstimate: details.fullTripEstimate ?? null,
     },
     { transaction }
   );
