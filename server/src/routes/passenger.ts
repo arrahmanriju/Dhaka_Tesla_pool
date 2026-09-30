@@ -1,11 +1,11 @@
 import { Router, Response, NextFunction } from 'express';
 import { Op } from 'sequelize';
-import { sequelize, User, RideRequest, Vehicle, DriverProfile } from '../models';
+import { sequelize, User, RideRequest, Vehicle, DriverProfile, RideEvent } from '../models';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 import { validateTransition, RideStatus } from '../models/RideRequest';
 import { isFareLocked, recalculatePoolFares } from '../utils/poolFares';
 import { shareRatePercent } from '../utils/fareCalculator';
-import { recordRideEvent } from '../utils/rideEvents';
+import { recordRideEvent, joinedMidTrip } from '../utils/rideEvents';
 
 const router = Router();
 
@@ -114,7 +114,32 @@ const OPEN: RideStatus[] = ['REQUESTED', 'MATCHED', 'DRIVER_ARRIVED', 'STARTED']
 
 const firstName = (fullName: string | null | undefined) => (fullName ?? '').trim().split(/\s+/)[0] ?? '';
 
-async function enrichRide(ride: any) {
+// ---------------------------------------------------------------------------
+// The passenger's OWN lifecycle history: when the ride was requested, matched, and so on.
+// Only events of this passenger's ride are read (also filtered by passengerId), and they carry
+// nothing about anyone else: `ridersOnboard` is just a head count of people already travelling
+// when this passenger was matched, and `joinedMidTrip` says that count was above zero.
+// ---------------------------------------------------------------------------
+async function timelineFor(rideIds: string[], passengerId: string) {
+  if (rideIds.length === 0) return new Map<string, any[]>();
+  const events: any[] = await RideEvent.findAll({
+    where: { rideRequestId: { [Op.in]: rideIds }, passengerId },
+    order: [['id', 'ASC']],
+  });
+  const byRide = new Map<string, any[]>();
+  for (const e of events) {
+    const list = byRide.get(e.rideRequestId) ?? [];
+    list.push({
+      status: e.status,
+      at: e.createdAt,
+      ...(e.status === 'MATCHED' ? { ridersOnboard: e.ridersOnboard, joinedMidTrip: joinedMidTrip(e) } : {}),
+    });
+    byRide.set(e.rideRequestId, list);
+  }
+  return byRide;
+}
+
+async function enrichRide(ride: any, timeline: any[] = []) {
   const status = ride.status as RideStatus;
   const vehicle: any = ride.vehicleId
     ? await Vehicle.findByPk(ride.vehicleId, {
@@ -201,6 +226,8 @@ async function enrichRide(ride: any) {
     poolDiscountApplied: ride.poolDiscount > 0,
     isSharedRide: coPassengers > 0,
     canCancel: PASSENGER_CANCELLABLE.includes(ride.status as RideStatus),
+    timeline,
+    joinedMidTrip: timeline.some((e) => e.joinedMidTrip === true),
     createdAt: ride.createdAt,
     updatedAt: ride.updatedAt,
   };
@@ -226,7 +253,8 @@ router.get('/rides/active', ownPassenger, async (req: AuthenticatedRequest, res:
       order: [['createdAt', 'DESC']],
     });
 
-    const enriched = await Promise.all(activeRides.map(enrichRide));
+    const timelines = await timelineFor(activeRides.map((r: any) => r.id), passengerId);
+    const enriched = await Promise.all(activeRides.map((r: any) => enrichRide(r, timelines.get(r.id) ?? [])));
     res.json({ rides: enriched });
   } catch (error) {
     console.error('Passenger active rides error:', error);
@@ -252,9 +280,11 @@ router.get('/rides/history', ownPassenger, async (req: AuthenticatedRequest, res
       order: [['updatedAt', 'DESC']],
     });
 
+    const timelines = await timelineFor(history.map((r: any) => r.id), passengerId);
     res.json({
       rides: history.map((r: any) => ({
         id: r.id,
+        timeline: timelines.get(r.id) ?? [],
         pickupZone: r.pickupZone,
         destinationZone: r.destinationZone,
         seatCount: r.seatCount,
@@ -290,7 +320,8 @@ router.get('/rides/:id', ownPassenger, async (req: AuthenticatedRequest, res: Re
     const ride: any = await findOwnedRide(rideId, passengerId, res);
     if (!ride) return;
 
-    res.json({ ride: await enrichRide(ride) });
+    const timelines = await timelineFor([ride.id], passengerId);
+    res.json({ ride: await enrichRide(ride, timelines.get(ride.id) ?? []) });
   } catch (error) {
     console.error('Passenger get ride error:', error);
     res.status(500).json({ error: 'Internal server error' });

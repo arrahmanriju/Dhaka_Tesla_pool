@@ -1,9 +1,10 @@
 import { Router, Request, Response } from 'express';
 import { Op } from 'sequelize';
-import { sequelize, User, Vehicle, RideRequest, DriverProfile } from '../models';
+import { sequelize, User, Vehicle, RideRequest, DriverProfile, RideEvent } from '../models';
 import { validateTransition, RideStatus } from '../models/RideRequest';
 import { isFareLocked, recalculatePoolFares } from '../utils/poolFares';
-import { recordRideEvent } from '../utils/rideEvents';
+import { recordRideEvent, joinedMidTrip } from '../utils/rideEvents';
+import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 
 const router = Router();
 
@@ -369,6 +370,54 @@ router.get('/rides/pool', async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('Get pool error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /driver/rides/timeline   (driver login required)
+//
+// The lifecycle history of the rides this driver has carried, oldest first (the latest 200
+// events): who was requested, matched, arrived, started, completed or cancelled, and when.
+// `joinedMidTrip` marks a passenger matched while someone else was already travelling;
+// `ridersOnboard` is how many were travelling at that moment. Passengers appear by FIRST NAME only.
+// ---------------------------------------------------------------------------
+router.get('/rides/timeline', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (req.user!.role !== 'DRIVER') return res.status(403).json({ error: 'Only drivers can view this.' });
+    const driverId = req.user!.id;
+
+    const rides: any[] = await RideRequest.findAll({ where: { driverId }, attributes: ['id', 'passengerId'] });
+    if (rides.length === 0) return res.json({ events: [] });
+
+    const events: any[] = await RideEvent.findAll({
+      where: { rideRequestId: { [Op.in]: rides.map((r) => r.id) } },
+      order: [['id', 'DESC']],
+      limit: 200,
+    });
+    events.reverse();
+
+    const users: any[] = await User.findAll({
+      where: { id: [...new Set(rides.map((r) => r.passengerId))] },
+      attributes: ['id', 'name'],
+    });
+    const first = new Map(users.map((u) => [u.id, ((u.name ?? '').trim().split(/\s+/)[0]) ?? '']));
+
+    res.json({
+      events: events.map((e) => ({
+        id: e.id,
+        rideId: e.rideRequestId,
+        passengerFirstName: first.get(e.passengerId) ?? '',
+        status: e.status,
+        fromStatus: e.fromStatus,
+        at: e.createdAt,
+        poolSize: e.poolSize,
+        ridersOnboard: e.ridersOnboard,
+        joinedMidTrip: joinedMidTrip(e),
+      })),
+    });
+  } catch (error) {
+    console.error('Get ride timeline error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
