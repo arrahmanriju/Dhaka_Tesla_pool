@@ -9,7 +9,7 @@ import passengerRoutes from './routes/passenger';
 import { sequelize, storagePath } from './models';
 import { UPLOADS_DIR } from './utils/onboarding';
 import onboardingRoutes from './routes/onboarding';
-import { migrateUsersTable, migrateRideRequestsTable, migrateFaresToTaka, migrateMidTripCancellation, migratePayments, ensureOneActiveRideIndex } from './migrations';
+import { migrateUsersTable, migrateRideRequestsTable, migrateFaresToTaka, migrateMidTripCancellation, migratePayments, migrateVehicleCodes, ensureOneActiveRideIndex } from './migrations';
 
 dotenv.config();
 
@@ -79,6 +79,7 @@ if (require.main === module) {
     // migration re-prices open pools), because the model selects all of its columns.
     .then(() => migrateMidTripCancellation())
     .then(() => migratePayments())
+    .then(() => migrateVehicleCodes())
     .then(() => migrateFaresToTaka())
     .then(() => sequelize.sync())
     .then(() => ensureOneActiveRideIndex())

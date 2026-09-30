@@ -41,6 +41,7 @@ async function seed() {
       modelName: 'Bullet',
       seatCapacity: 3,
       licensePlate: jashimProfile.driverCode, // the Tesla ID doubles as the vehicle identifier
+      vehicleCode: 'BULLET', // the public code on Bullet's QR sticker (hand-picked so the demo is easy to type)
     });
     console.log(`Onboarded driver Jashim: vehicle Bullet (3 seats), Banani, ${jashimProfile.driverCode}`);
 

@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { generateVehicleCode } from './utils/vehicleCode';
 import { sequelize, storagePath } from './models';
 import { recalculatePoolFares } from './utils/poolFares';
 
@@ -205,4 +206,31 @@ export async function migratePayments(): Promise<void> {
   await add('RideRequests', 'paymentMethod', "TEXT NOT NULL DEFAULT 'cash'");
   await add('RideRequests', 'paymentStatus', "TEXT NOT NULL DEFAULT 'NOT_DUE'");
   await add('RideRequests', 'paymentAmount', 'INTEGER');
+}
+
+/**
+ * Idempotent: gives every vehicle a public `vehicleCode` (the QR sticker's content and the typeable
+ * fallback ID) in a database created before the QR street-ride flow. `sequelize.sync()` never adds
+ * columns to an existing table, and SQLite cannot add a UNIQUE column with ALTER, so the column is
+ * added, existing vehicles are backfilled with fresh random codes, and the uniqueness is a separate index.
+ */
+export async function migrateVehicleCodes(): Promise<void> {
+  const [cols] = (await sequelize.query('PRAGMA table_info(`Vehicles`)')) as [{ name: string }[], unknown];
+  if (cols.length === 0) return; // fresh database: sync() creates the table with the column and its unique constraint
+  if (!cols.some((c) => c.name === 'vehicleCode')) {
+    await sequelize.query('ALTER TABLE `Vehicles` ADD COLUMN `vehicleCode` VARCHAR(255)');
+    console.log('[migrate] Vehicles: added vehicleCode column');
+  }
+  const [missing] = (await sequelize.query('SELECT `id` FROM `Vehicles` WHERE `vehicleCode` IS NULL')) as [{ id: string }[], unknown];
+  for (const { id } of missing) {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const code = generateVehicleCode();
+      const [taken] = (await sequelize.query('SELECT 1 FROM `Vehicles` WHERE `vehicleCode` = ?', { replacements: [code] })) as [unknown[], unknown];
+      if (taken.length === 0) {
+        await sequelize.query('UPDATE `Vehicles` SET `vehicleCode` = ? WHERE `id` = ?', { replacements: [code, id] });
+        break;
+      }
+    }
+  }
+  await sequelize.query('CREATE UNIQUE INDEX IF NOT EXISTS `vehicles_vehicle_code_unique` ON `Vehicles` (`vehicleCode`)');
 }

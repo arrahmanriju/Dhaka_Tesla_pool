@@ -1,4 +1,5 @@
 import { DataTypes, Model } from 'sequelize';
+import { VEHICLE_CODE_PATTERN, generateVehicleCode } from '../utils/vehicleCode';
 
 export class Vehicle extends Model {
   declare id: string;
@@ -6,6 +7,8 @@ export class Vehicle extends Model {
   declare modelName: string;
   declare seatCapacity: number;
   declare licensePlate: string;
+  /** Public code on the QR sticker, and typed by hand as a fallback (see utils/vehicleCode.ts). Unique. */
+  declare vehicleCode: string;
   declare isActive: boolean;
   declare occupiedSeats: number;
   declare readonly createdAt: Date;
@@ -44,6 +47,14 @@ export const initVehicle = (sequelize: any) => {
         allowNull: false,
         unique: true,
       },
+      // Public, unique, typeable: the QR sticker's content and the fallback ID. Generated automatically
+      // when a vehicle is created without one.
+      vehicleCode: {
+        type: DataTypes.STRING,
+        allowNull: false,
+        unique: true,
+        validate: { is: VEHICLE_CODE_PATTERN },
+      },
       isActive: {
         type: DataTypes.BOOLEAN,
         defaultValue: true,
@@ -61,6 +72,20 @@ export const initVehicle = (sequelize: any) => {
     {
       sequelize,
       tableName: 'Vehicles',
+      hooks: {
+        // Every vehicle gets a public code, however it is created (onboarding, the vehicle API, the seed).
+        beforeValidate: async (vehicle: Vehicle) => {
+          if (vehicle.vehicleCode) return;
+          for (let attempt = 0; attempt < 20; attempt++) {
+            const code = generateVehicleCode();
+            if ((await Vehicle.count({ where: { vehicleCode: code } })) === 0) {
+              vehicle.vehicleCode = code;
+              return;
+            }
+          }
+          throw new Error('Could not generate a unique vehicle code');
+        },
+      },
     }
   );
 };
