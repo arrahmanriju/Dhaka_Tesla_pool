@@ -11,6 +11,9 @@ import { usePreferences, useFormatApiError } from '@/lib/preferences';
 
 type Tab = 'pending' | 'active' | 'vehicle' | 'history';
 
+/** How often the active tab re-reads the pool, so earnings follow passengers joining or leaving. */
+const EARNINGS_REFRESH_MS = 10_000;
+
 export default function DriverDashboard() {
   const router = useRouter();
   const { t } = usePreferences();
@@ -209,7 +212,7 @@ function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline
                   <SeatCount n={ride.seatCount} />
                 </span>
                 <span className="ride-card__meta-item">
-                  {t('common.fare')} <strong>৳{ride.estimatedFareBDT}</strong>
+                  {t('common.fare')} <strong>৳{ride.estimatedFare}</strong>
                 </span>
                 <span className="ride-card__meta-item" style={{ color: 'var(--text-muted)' }}>
                   {new Date(ride.createdAt).toLocaleTimeString(locale)}
@@ -236,27 +239,37 @@ function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline
 
 // ─── Active Rides Tab ──────────────────────────────────────────────────────
 function ActiveRidesTab({ driverId }: { driverId: string }) {
-  const { t } = usePreferences();
+  const { t, tp } = usePreferences();
   const formatError = useFormatApiError();
   const [rides, setRides] = useState<Ride[]>([]);
+  // What the passengers in this pool pay in total = what the driver earns for the ride
+  const [totalEarnings, setTotalEarnings] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState('');
 
-  const load = useCallback(async () => {
-    setLoading(true); setError('');
+  // `silent` refreshes in the background: no spinner, and a failed refresh is ignored.
+  const load = useCallback(async (silent = false) => {
+    if (!silent) { setLoading(true); setError(''); }
     try {
       const res = await driverApi.getActiveRides(driverId);
       setRides(res.rides);
+      setTotalEarnings(res.totalEarnings);
     } catch (err: any) {
-      setError(formatError(err));
+      if (!silent) setError(formatError(err));
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [driverId, formatError]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Earnings change when a passenger joins or leaves the pool (until the trip starts).
+  useEffect(() => {
+    const timer = setInterval(() => { if (!document.hidden) load(true); }, EARNINGS_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [load]);
 
   const doAction = async (
     rideId: string,
@@ -287,7 +300,7 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
           <h1 className="section-title">{t('d.active.title')}</h1>
           <p className="section-desc">{t('d.active.desc')}</p>
         </div>
-        <button className="btn btn--ghost btn--sm" onClick={load} id="refresh-active-driver">{t('common.refresh')}</button>
+        <button className="btn btn--ghost btn--sm" onClick={() => load()} id="refresh-active-driver">{t('common.refresh')}</button>
       </div>
 
       {error && <ErrorBanner message={error} />}
@@ -301,6 +314,18 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
         />
       ) : rides.length > 0 ? (
         <div className="ride-list">
+          {/* Total earnings for this ride: the sum of what the passengers in the pool pay */}
+          <div className="earnings-card" id="ride-earnings" aria-live="polite">
+            <div>
+              <div className="earnings-card__label">{t('d.active.earningsTitle')}</div>
+              <div className="earnings-card__amount">৳{totalEarnings}</div>
+              <div className="earnings-card__sub">
+                {tp('d.active.earningsFrom', rides.length)}
+                {rides.every((r) => r.fareLocked) && ` · 🔒 ${t('fare.locked')}`}
+              </div>
+            </div>
+            <p className="earnings-card__note">{t('d.active.earningsNote')}</p>
+          </div>
           {rides.map((ride) => (
             <ActiveDriverRideCard
               key={ride.id}
@@ -347,7 +372,7 @@ function ActiveDriverRideCard({
           <SeatCount n={ride.seatCount} />
         </span>
         <span className="ride-card__meta-item">
-          {t('common.fare')} <strong>৳{ride.estimatedFareBDT}</strong>
+          {t('common.fare')} <strong>৳{ride.estimatedFare}</strong>
         </span>
         {ride.vehicle && (
           <span className="ride-card__meta-item">
@@ -498,7 +523,7 @@ function HistoryTab({ driverId }: { driverId: string }) {
           </div>
           <div className="stat-card">
             <div className="stat-card__label">{t('d.history.earned')}</div>
-            <div className="stat-card__value">৳{(totalEarned / 100).toFixed(0)}</div>
+            <div className="stat-card__value">৳{totalEarned}</div>
           </div>
         </div>
       )}
@@ -524,7 +549,7 @@ function HistoryTab({ driverId }: { driverId: string }) {
                   <SeatCount n={ride.seatCount} />
                 </span>
                 <span className="ride-card__meta-item">
-                  {t('common.fare')} <strong>৳{ride.estimatedFareBDT}</strong>
+                  {t('common.fare')} <strong>৳{ride.estimatedFare}</strong>
                 </span>
                 <span className="ride-card__meta-item" style={{ color: 'var(--text-muted)' }}>
                   {new Date(ride.updatedAt).toLocaleDateString(locale, {

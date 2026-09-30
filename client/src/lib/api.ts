@@ -102,13 +102,23 @@ export interface RideRequestInput {
   allowSharing: boolean;
 }
 
-export interface FareEstimate {
-  /** Fare if nobody joins — what a private ride always costs (paisa) */
+/** What one passenger pays when `passengers` people share the ride (whole taka). */
+export interface FareTier {
+  passengers: number;
+  ratePercent: number;
   fare: number;
-  fareBDT: string;
-  /** Fare once a second passenger shares the ride (paisa); null for a private ride */
+}
+
+/** All money is whole taka, a multiple of ৳5. */
+export interface FareEstimate {
+  /** Their own full fare (pickup → destination) */
+  baseFare: number;
+  /** The price riding alone — what a private ride always costs */
+  fare: number;
+  /** The price once one other passenger joins; null for a private ride or a booking that fills the car */
   poolFare: number | null;
-  poolFareBDT: string | null;
+  /** The (lower) price with 2 and with 3 passengers; empty for a private ride */
+  tiers: FareTier[];
 }
 
 export interface Ride {
@@ -118,14 +128,18 @@ export interface Ride {
   seatCount: number;
   /** false = private ride, never pooled */
   allowSharing?: boolean;
-  /** Solo fare before any pool discount (paisa) */
+  /** This passenger's own fare when riding alone (whole taka) */
   baseFare?: number;
-  /** Current fare after applying/removing pool discount (paisa) */
+  /** What this passenger pays right now (whole taka); drops as others join, final once STARTED */
   estimatedFare: number;
-  estimatedFareBDT: string;
-  /** Pool discount applied to this passenger (paisa). 0 if solo. */
+  /** What sharing saves this passenger (whole taka). 0 when riding alone or private. */
   poolDiscount?: number;
-  poolDiscountBDT?: string;
+  /** true once the trip has started: the fare can no longer change */
+  fareLocked?: boolean;
+  /** Passengers currently in the pool, including this one */
+  poolSize?: number;
+  /** Percentage of their own base fare this passenger pays (100 / 70 / 55) */
+  shareRatePercent?: number;
   status: RideStatus;
   canCancel?: boolean;
   vehicle?: {
@@ -254,7 +268,6 @@ export const driverApi = {
     request<{ requests: Ride[] }>(`/ride-requests/pending?driverId=${driverId}`)
       .then(r => ({ noVehicle: false, rides: r.requests.map((req: any) => ({
         ...req,
-        estimatedFareBDT: (req.estimatedFare / 100).toFixed(2),
         createdAt: req.createdAt ?? new Date().toISOString(),
         updatedAt: req.updatedAt ?? new Date().toISOString(),
       }))}))
@@ -270,21 +283,24 @@ export const driverApi = {
     }),
 
   // Backend: GET /driver/rides/active?driverId=...
+  // `totalEarnings` is the whole taka the passengers in this pool pay (what the driver earns).
   getActiveRides: (driverId: string) =>
-    request<{ rides: Ride[] }>(`/driver/rides/active?driverId=${driverId}`)
-      .then(r => ({ rides: r.rides.map((ride: any) => ({
-        ...ride,
-        estimatedFareBDT: ride.estimatedFareBDT ?? (ride.estimatedFare / 100).toFixed(2),
-        createdAt: ride.createdAt ?? new Date().toISOString(),
-        updatedAt: ride.updatedAt ?? new Date().toISOString(),
-      }))})),
+    request<{ rides: Ride[]; poolSize: number; totalEarnings: number }>(`/driver/rides/active?driverId=${driverId}`)
+      .then(r => ({
+        poolSize: r.poolSize,
+        totalEarnings: r.totalEarnings,
+        rides: r.rides.map((ride: any) => ({
+          ...ride,
+          createdAt: ride.createdAt ?? new Date().toISOString(),
+          updatedAt: ride.updatedAt ?? new Date().toISOString(),
+        })),
+      })),
 
   // Backend: GET /driver/rides/history?driverId=...
   getHistory: (driverId: string) =>
     request<{ rides: Ride[] }>(`/driver/rides/history?driverId=${driverId}`)
       .then(r => ({ rides: r.rides.map((ride: any) => ({
         ...ride,
-        estimatedFareBDT: ride.estimatedFareBDT ?? (ride.estimatedFare / 100).toFixed(2),
         createdAt: ride.createdAt ?? new Date().toISOString(),
         updatedAt: ride.updatedAt ?? new Date().toISOString(),
       }))})),

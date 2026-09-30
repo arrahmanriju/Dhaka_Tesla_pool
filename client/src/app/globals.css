@@ -526,6 +526,33 @@ select.form-control option { background: var(--bg-surface); color: var(--text-pr
 .notice-card__title { font-size: 14px; font-weight: 700; color: var(--fg-warning); }
 .notice-card__desc { font-size: 13px; color: var(--text-secondary); margin-top: 2px; }
 
+.fare-line { display: inline-flex; align-items: baseline; flex-wrap: wrap; gap: var(--space-1) var(--space-2); }
+.fare-line__amount--saved { color: var(--success); }
+.fare-line__note { font-size: 12px; color: var(--text-muted); }
+.fare-line__note--saved { color: var(--success); font-weight: 600; }
+.fare-line__lock { font-size: 11px; font-weight: 600; color: var(--text-secondary); }
+
+.fare-tiers {
+  padding: var(--space-4) var(--space-5); border-radius: var(--radius-lg);
+  background: var(--bg-raised); border: 1px solid var(--border-subtle);
+  display: flex; flex-direction: column; gap: var(--space-2);
+}
+.fare-tiers__title { font-size: 13px; font-weight: 700; }
+.fare-tiers__list { list-style: none; display: flex; flex-direction: column; gap: 2px; font-size: 14px; }
+.fare-tiers__list li::before { content: '›'; color: var(--brand-primary); font-weight: 700; margin-inline-end: var(--space-2); }
+.fare-tiers__note { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+
+.earnings-card {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap;
+  padding: var(--space-5) var(--space-6); border-radius: var(--radius-lg);
+  background: linear-gradient(135deg, rgba(16,185,129,0.1), rgba(16,185,129,0.04));
+  border: 1px solid rgba(16,185,129,0.3);
+}
+.earnings-card__label { font-size: 13px; color: var(--text-secondary); }
+.earnings-card__amount { font-size: 28px; font-weight: 800; letter-spacing: 0; color: var(--success); }
+.earnings-card__sub { font-size: 12px; color: var(--text-muted); }
+.earnings-card__note { font-size: 12px; color: var(--text-muted); max-width: 320px; line-height: 1.5; }
+
 .auth-link { font-size: 13px; font-weight: 600; color: var(--brand-primary); }
 .auth-link:hover { text-decoration: underline; }
 .auth-link--end { align-self: flex-end; }

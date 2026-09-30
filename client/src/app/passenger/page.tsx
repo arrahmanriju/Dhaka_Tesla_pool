@@ -3,12 +3,15 @@ import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { AppNav } from '@/components/AppNav';
 import { StatusBadge, StatusTimeline } from '@/components/StatusBadge';
-import { LoadingScreen, EmptyState, ErrorBanner, SuccessBanner, SeatCount } from '@/components/UI';
+import { LoadingScreen, EmptyState, ErrorBanner, SuccessBanner, SeatCount, PassengerFare } from '@/components/UI';
 import { passengerApi, type FareEstimate, type Ride, type User, ApiError } from '@/lib/api';
 import { getUser } from '@/lib/auth';
 import { usePreferences } from '@/lib/preferences';
 
 type Tab = 'request' | 'active' | 'history';
+
+/** How often the active-ride tab re-reads the ride, so a fare change from a joiner/leaver shows up. */
+const FARE_REFRESH_MS = 10_000;
 
 export default function PassengerDashboard() {
   const router = useRouter();
@@ -251,14 +254,8 @@ function RequestRideTab({
                 <div className="fare-display__label">{t('p.req.estFare')}</div>
                 {estimate ? (
                   <>
-                    <div className="fare-display__amount">৳{estimate.fareBDT}</div>
-                    <div className="fare-display__sub">
-                      {tp('p.req.forSeats', seats)}
-                      {' · '}
-                      {estimate.poolFareBDT !== null
-                        ? t('p.req.poolNote', { amount: estimate.poolFareBDT })
-                        : t('p.req.privateNote')}
-                    </div>
+                    <div className="fare-display__amount">৳{estimate.fare}</div>
+                    <div className="fare-display__sub">{tp('p.req.forSeats', seats)}</div>
                   </>
                 ) : (
                   <div className="fare-display__sub">
@@ -267,6 +264,26 @@ function RequestRideTab({
                 )}
               </div>
             </div>
+
+            {/* Why the price can drop: what you would pay as others join */}
+            {estimate && (
+              <div className="fare-tiers" id="fare-tiers">
+                {estimate.tiers.length > 0 ? (
+                  <>
+                    <div className="fare-tiers__title">{t('p.req.dropsTitle')}</div>
+                    <ul className="fare-tiers__list">
+                      <li>{t('p.req.aloneTier', { fare: estimate.fare })}</li>
+                      {estimate.tiers.map((tier) => (
+                        <li key={tier.passengers}>{t('p.req.tier', { n: tier.passengers, fare: tier.fare })}</li>
+                      ))}
+                    </ul>
+                    <p className="fare-tiers__note">{t('p.req.dropsNote')}</p>
+                  </>
+                ) : (
+                  <p className="fare-tiers__note">{allowSharing ? t('p.req.fullCar') : t('p.req.privateNote')}</p>
+                )}
+              </div>
+            )}
 
             <button
               id="request-ride-submit"
@@ -301,19 +318,26 @@ function ActiveRidesTab({
   const [cancelling, setCancelling] = useState<string | null>(null);
   const [cancelSuccess, setCancelSuccess] = useState('');
 
-  const load = useCallback(async () => {
-    setLoading(true); setError('');
+  // `silent` refreshes in the background: no spinner, and a failed refresh is ignored.
+  const load = useCallback(async (silent = false) => {
+    if (!silent) { setLoading(true); setError(''); }
     try {
       const res = await passengerApi.getActiveRides(passengerId);
       setRides(res.rides);
     } catch (err: any) {
-      setError(err.message);
+      if (!silent) setError(err.message);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [passengerId]);
 
   useEffect(() => { load(); }, [load]);
+
+  // The fare changes when someone joins or leaves the pool (until the trip starts), so keep it fresh.
+  useEffect(() => {
+    const timer = setInterval(() => { if (!document.hidden) load(true); }, FARE_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [load]);
 
   const handleCancel = async (rideId: string) => {
     if (!confirm(t('p.active.confirmCancel'))) return;
@@ -338,7 +362,7 @@ function ActiveRidesTab({
           <h1 className="section-title">{t('p.active.title')}</h1>
           <p className="section-desc">{t('p.active.desc')}</p>
         </div>
-        <button className="btn btn--ghost btn--sm" onClick={load} id="refresh-active">{t('common.refresh')}</button>
+        <button className="btn btn--ghost btn--sm" onClick={() => load()} id="refresh-active">{t('common.refresh')}</button>
       </div>
 
       {error && <ErrorBanner message={error} />}
@@ -382,8 +406,6 @@ function ActiveRideCard({
   cancelling: boolean;
 }) {
   const { t, tp, tz, locale } = usePreferences();
-  const hasDiscount = (ride.poolDiscount ?? 0) > 0;
-  const baseFareBDT = ride.baseFare ? (ride.baseFare / 100).toFixed(2) : null;
 
   return (
     <div className="ride-card">
@@ -416,21 +438,9 @@ function ActiveRideCard({
           <SeatCount n={ride.seatCount} />
         </span>
 
-        {/* Fare — show original and discounted if pool discount applied */}
+        {/* Fare: this passenger's OWN fare only, e.g. "৳70 (shared, you save ৳30)" */}
         <span className="ride-card__meta-item">
-          {hasDiscount && baseFareBDT ? (
-            <>
-              <span style={{ textDecoration: 'line-through', color: 'var(--text-muted)', marginRight: 4 }}>
-                ৳{baseFareBDT}
-              </span>
-              <strong style={{ color: 'var(--success)' }}>৳{ride.estimatedFareBDT}</strong>
-              <span style={{ fontSize: 11, color: 'var(--success)', marginLeft: 4 }}>
-                {t('common.poolDiscount', { amount: ride.poolDiscountBDT ?? 0 })}
-              </span>
-            </>
-          ) : (
-            <>{t('common.fare')} <strong>৳{ride.estimatedFareBDT}</strong></>
-          )}
+          {t('common.fare')} <PassengerFare ride={ride} />
         </span>
 
         {/* Driver info */}
@@ -508,7 +518,7 @@ function HistoryTab({ passengerId }: { passengerId: string }) {
           </div>
           <div className="stat-card">
             <div className="stat-card__label">{t('p.history.spent')}</div>
-            <div className="stat-card__value">৳{(totalFare / 100).toFixed(0)}</div>
+            <div className="stat-card__value">৳{totalFare}</div>
           </div>
         </div>
       )}
@@ -534,12 +544,7 @@ function HistoryTab({ passengerId }: { passengerId: string }) {
                   <SeatCount n={ride.seatCount} />
                 </span>
                 <span className="ride-card__meta-item">
-                  {t('common.fare')} <strong>৳{ride.estimatedFareBDT}</strong>
-                  {(ride.poolDiscount ?? 0) > 0 && (
-                    <span style={{ fontSize: 11, color: 'var(--success)', marginLeft: 4 }}>
-                      {t('p.history.poolDiscount', { amount: ride.poolDiscountBDT ?? 0 })}
-                    </span>
-                  )}
+                  {t('common.fare')} <PassengerFare ride={ride} />
                 </span>
                 <span className="ride-card__meta-item" style={{ color: 'var(--text-muted)' }}>
                   {new Date(ride.updatedAt).toLocaleDateString(locale, {
