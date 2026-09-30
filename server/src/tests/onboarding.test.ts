@@ -379,7 +379,7 @@ describe('Driver onboarding', () => {
         await request(app).get('/passenger/rides/active').set(asUser(passenger.id)),
         await request(app).get(`/passenger/rides/${rideId}`).set(asUser(passenger.id)),
         await request(app).get('/passenger/rides/history').set(asUser(passenger.id)),
-        await request(app).get(`/ride-requests/me?passengerId=${passenger.id}`),
+        await request(app).get('/ride-requests/me').set(asUser(passenger.id)),
         await request(app).get('/auth/me').set('Authorization', `Bearer ${passenger.token}`),
       ];
       for (const r of responses) {

@@ -219,11 +219,14 @@ router.post('/', authenticateToken, async (req: AuthenticatedRequest, res: Respo
 // GET /ride-requests/me
 // Passenger views their own requests (all statuses).
 // ---------------------------------------------------------------------------
-router.get('/me', async (req: Request, res: Response) => {
+router.get('/me', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const passengerId = req.query.passengerId as string;
-    if (!passengerId) {
-      return res.status(400).json({ error: 'passengerId is required in query params.' });
+    // The caller is the logged-in passenger; a passengerId that is not theirs is refused.
+    if (req.user!.role !== 'PASSENGER') return res.status(403).json({ error: 'Only passengers can view their requests.' });
+    const passengerId = req.user!.id;
+    const claimed = req.query.passengerId;
+    if (typeof claimed === 'string' && claimed !== passengerId) {
+      return res.status(403).json({ error: 'You can only access your own rides.' });
     }
 
     const requests = await RideRequest.findAll({
@@ -463,10 +466,10 @@ router.post('/:id/decline', authenticateToken, async (req: AuthenticatedRequest,
 // Returns the pool summary for a matched ride: co-passengers count (no PII),
 // and how much of their own fare each passenger pays (the share rate).
 // ---------------------------------------------------------------------------
-router.get('/:id/pool-info', async (req: Request, res: Response) => {
+router.get('/:id/pool-info', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const passengerId = req.query.passengerId as string;
+    const passengerId = req.user!.id; // the logged-in passenger, never an id from the query
 
     const ride: any = await RideRequest.findByPk(id);
     if (!ride) return res.status(404).json({ error: 'Ride not found.' });
