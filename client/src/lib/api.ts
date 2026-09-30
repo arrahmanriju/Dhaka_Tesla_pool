@@ -1,8 +1,9 @@
 // ─── Typed API client ──────────────────────────────────────────────────────
 // All calls go through this module so the base URL is always consistent.
 import { clearAuth, getToken } from './auth';
+import { apiBaseUrl } from './baseUrl';
 
-const BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+const BASE = apiBaseUrl(process.env.NEXT_PUBLIC_API_URL);
 
 export class ApiError extends Error {
   constructor(
