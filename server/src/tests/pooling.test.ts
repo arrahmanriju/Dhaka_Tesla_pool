@@ -348,12 +348,14 @@ describe('Pooling — all cases A–J', () => {
   });
 
   // =========================================================================
-  // CASE I: P2 requests after trip STARTED → not added to pool
+  // CASE I: a trip that has STARTED still takes a compatible passenger, and only a compatible one
+  // (mid-trip pooling is covered in depth in midTripPooling.test.ts)
   // =========================================================================
-  it('I: cannot join pool after trip has started', async () => {
+  it('I: after the trip has started, a compatible passenger can join and an unrelated one cannot', async () => {
     const driver = await createDriver('I');
     const p1 = await createPassenger('I1');
     const p2 = await createPassenger('I2');
+    const p3 = await createPassenger('I3');
     await createVehicle(driver.id, 4);
 
     const r1 = await requestRide(app, p1.id, 'Gulshan', 'Banani', 1);
@@ -361,11 +363,16 @@ describe('Pooling — all cases A–J', () => {
     await request(app).patch(`/driver/rides/${r1.body.rideRequest.id}/arrive`).send({ driverId: driver.id });
     await request(app).patch(`/driver/rides/${r1.body.rideRequest.id}/start`).send({ driverId: driver.id });
 
-    // P2 requests and driver tries to accept → rejected
     const r2 = await requestRide(app, p2.id, 'Gulshan', 'Banani', 1);
     const acc2 = await acceptRide(app, r2.body.rideRequest.id, driver.id);
-    expect(acc2.status).toBe(409);
-    expect(acc2.body.error).toMatch(/started/i);
+    expect(acc2.status).toBe(200);
+
+    // Gulshan → Dhanmondi heads the other way: rejected as incompatible, and stays REQUESTED
+    const r3 = await requestRide(app, p3.id, 'Gulshan', 'Dhanmondi', 1);
+    const acc3 = await acceptRide(app, r3.body.rideRequest.id, driver.id);
+    expect(acc3.status).toBe(409);
+    expect(acc3.body.error).toMatch(/incompatible/i);
+    expect(((await RideRequest.findByPk(r3.body.rideRequest.id)) as any).status).toBe('REQUESTED');
   });
 
   // =========================================================================

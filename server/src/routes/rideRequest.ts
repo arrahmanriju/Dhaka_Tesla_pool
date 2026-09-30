@@ -7,10 +7,10 @@ import {
   MAX_SEATS_PER_RIDE,
   MIN_SEATS_PER_RIDE,
   POOL_JOINABLE_STATUSES,
-  areZonesCompatible,
 } from '../models/RideRequest';
 import { calculateBaseFare, estimateFare, shareRatePercent } from '../utils/fareCalculator';
 import { isFareLocked, recalculatePoolFares } from '../utils/poolFares';
+import { checkPoolJoin, PoolVerdict } from '../utils/pooling';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 
 const router = Router();
@@ -238,18 +238,16 @@ router.get('/me', async (req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 // GET /ride-requests/pending
 //
-// MATCHING RULE (documented):
+// MATCHING RULE (documented; see README "Direction-aware pool matching"):
 //   A request is shown to a driver if ALL of the following hold:
 //   1. status = REQUESTED (not yet accepted by anyone)
-//   2. seatCount <= vehicle's available seats
-//   3. If the vehicle already has an active pool (status in POOL_JOINABLE_STATUSES),
-//      the new request's destinationZone must match the existing pool's destination
-//      (exact zone match — see areZonesCompatible() in RideRequest.ts).
-//      If the pool has already STARTED, no new passengers can join.
-//   4. The new request's pickupZone must match the vehicle's current pool pickup zone
-//      (if a pool exists).
+//   2. seatCount <= the vehicle's available seats
+//   3. checkPoolJoin() accepts it for the rides already on the vehicle (MATCHED, DRIVER_ARRIVED or
+//      STARTED): private rides are never mixed, and the route must run the same way as EVERY ride
+//      in the pool (utils/routeDirection.ts). An empty vehicle accepts any route.
 //
-// This keeps pooling simple and auditable without real routing.
+// A ride that has already STARTED does not close the pool: compatible requests keep showing up so
+// the driver can add someone mid-trip. `midTrip` tells the caller that is the case.
 // ---------------------------------------------------------------------------
 router.get('/pending', async (req: Request, res: Response) => {
   try {
@@ -266,39 +264,26 @@ router.get('/pending', async (req: Request, res: Response) => {
 
     const availableSeats = vehicle.seatCapacity - vehicle.occupiedSeats;
 
-    // Find current active rides on this vehicle to enforce pooling constraints
-    const pooledRides: any[] = await RideRequest.findAll({
+    // Rides currently on this vehicle: they decide who else can join.
+    const pool: any[] = await RideRequest.findAll({
       where: {
         vehicleId: vehicle.id,
         status: { [Op.in]: [...POOL_JOINABLE_STATUSES] },
       },
     });
+    const midTrip = pool.some((r: any) => r.status === 'STARTED');
 
-    // A vehicle carrying a private ride takes nobody else.
-    if (pooledRides.some((r: any) => !r.allowSharing)) {
-      return res.json({ requests: [] });
-    }
-
-    const whereClause: any = {
-      status: 'REQUESTED',
-      seatCount: { [Op.lte]: availableSeats },
-    };
-
-    if (pooledRides.length > 0) {
-      // A pool is already running: only passengers who agreed to share can join it.
-      whereClause.allowSharing = true;
-      // Pool already exists — new passengers must have same destination
-      const firstRide = pooledRides[0]!;
-      whereClause.pickupZone = firstRide.pickupZone;
-      whereClause.destinationZone = firstRide.destinationZone;
-    }
-
-    const pendingRequests: any[] = await RideRequest.findAll({
-      where: whereClause,
+    const candidates: any[] = await RideRequest.findAll({
+      where: { status: 'REQUESTED', seatCount: { [Op.lte]: availableSeats } },
       order: [['createdAt', 'ASC']],
     });
+    const compatible = candidates.filter((c: any) => checkPoolJoin(pool, c).ok);
 
-    res.json({ requests: pendingRequests.map(formatRide) });
+    res.json({
+      requests: compatible.map((r: any) => ({ ...formatRide(r), joinsMidTrip: midTrip })),
+      midTrip,
+      availableSeats,
+    });
   } catch (error) {
     console.error('Get pending requests error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -308,29 +293,28 @@ router.get('/pending', async (req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 // POST /ride-requests/:id/accept
 //
-// Driver accepts a pending request. The ride is added to the driver's pool
-// on their active vehicle.
+// Driver accepts a pending request. The ride is added to the driver's pool on their active vehicle.
+// This is the ONLY way a passenger joins a pool, before the trip or in the middle of it.
 //
-// POOLING LOGIC:
-//   - If the vehicle has no active rides: accept freely (first in pool).
-//   - If the vehicle has active rides (pool exists):
-//       • Ensure the new request's pickup and destination match the pool
-//         (same rules as GET /pending).
-//       • Ensure pool is not yet STARTED (no new joiners after trip starts).
-//   - After accepting, recalculate ALL pool fares:
-//       • 2+ passengers → apply POOL_DISCOUNT to everyone
-//       • 1 passenger   → no discount
+// POOLING LOGIC (all inside one transaction, so it sees the pool exactly as it is when it commits):
+//   - checkPoolJoin(): private rides are never mixed, and the request's route must run the same way
+//     as every ride already on the vehicle. A STARTED ride does not block joining.
+//   - the seat claim below: capacity can never be exceeded, even by simultaneous accepts.
+//   - after accepting, every passenger who is not yet STARTED is re-priced (see utils/poolFares.ts).
 //
 // CONCURRENCY:
-//   We use a Sequelize transaction with a conditional atomic UPDATE on the
-//   Vehicle row. The WHERE clause for the seat increment includes a constraint
-//   `seatCapacity >= occupiedSeats + seatCount`. SQLite evaluates this
-//   atomically during the UPDATE. If the constraint fails (capacity full),
-//   `updatedCount` is 0 and we throw CAPACITY_EXCEEDED, rolling back the
-//   transaction. A second concurrent request that passes the constraint check
-//   but arrives after the first committed will see `updatedCount = 0` too
-//   because the arithmetic no longer satisfies the constraint.
+//   The transaction is IMMEDIATE: it takes SQLite's write lock up front, so two accepts for the same
+//   vehicle run one after the other, and the second one re-reads the pool the first one left.
+//   The seat claim is an atomic conditional UPDATE on the Vehicle row: occupiedSeats is incremented
+//   only where seatCapacity >= occupiedSeats + seatCount. If it changes no row, capacity was
+//   exceeded and CAPACITY_EXCEEDED rolls everything back.
 // ---------------------------------------------------------------------------
+class PoolRejected extends Error {
+  constructor(public verdict: Extract<PoolVerdict, { ok: false }>) {
+    super(verdict.code);
+  }
+}
+
 router.post('/:id/accept', async (req: Request, res: Response) => {
   try {
     const id = req.params.id as string;
@@ -351,65 +335,27 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Request not found or not in REQUESTED state.' });
     }
 
-    // Check pool compatibility if vehicle already has active rides
-    const pooledRides: any[] = await RideRequest.findAll({
-      where: {
-        vehicleId: vehicle.id,
-        status: { [Op.in]: [...POOL_JOINABLE_STATUSES] },
-      },
-    });
-
-    // Private rides: a private passenger needs an empty vehicle, and a vehicle
-    // carrying a private ride takes nobody else.
-    if (!rideReq.allowSharing && pooledRides.length > 0) {
-      return res.status(409).json({
-        error: 'This is a private ride request: it needs a vehicle with no other passengers.',
+    await sequelize.transaction({ type: Transaction.TYPES.IMMEDIATE }, async (t: any) => {
+      // ── STEP 1: Who is on the vehicle right now, and may this passenger join them? ──
+      const pool: any[] = await RideRequest.findAll({
+        where: { vehicleId: vehicle.id, status: { [Op.in]: [...POOL_JOINABLE_STATUSES] } },
+        transaction: t,
       });
-    }
-    if (pooledRides.some((r: any) => !r.allowSharing)) {
-      return res.status(409).json({
-        error: 'Cannot add a passenger: this vehicle is carrying a private ride.',
-      });
-    }
+      const candidate: any = await RideRequest.findOne({ where: { id: rideReq.id, status: 'REQUESTED' }, transaction: t });
+      if (!candidate) throw new Error('ALREADY_TAKEN');
 
-    if (pooledRides.length > 0) {
-      const firstRide = pooledRides[0]!;
+      const verdict = checkPoolJoin(pool, candidate);
+      if (!verdict.ok) throw new PoolRejected(verdict);
 
-      // Rule: no new passengers once trip has started
-      const hasStarted = pooledRides.some((r: any) => r.status === 'STARTED');
-      if (hasStarted) {
-        return res.status(409).json({
-          error: 'Cannot add a new passenger: the trip has already started.',
-        });
-      }
-
-      // Rule: pickup zone must match
-      if (rideReq.pickupZone !== firstRide.pickupZone) {
-        return res.status(409).json({
-          error: `Pool incompatible: pickup zone must be ${firstRide.pickupZone} to join this pool.`,
-        });
-      }
-
-      // Rule: destination must be compatible (same zone)
-      if (!areZonesCompatible(firstRide.destinationZone, rideReq.destinationZone)) {
-        return res.status(409).json({
-          error: `Pool incompatible: destination zone must be ${firstRide.destinationZone} to join this pool.`,
-        });
-      }
-    }
-
-    await sequelize.transaction(async (t: any) => {
-      // ── STEP 1: Atomic seat reservation ────────────────────────────────
+      // ── STEP 2: Atomic seat reservation ────────────────────────────────
       // Increment occupiedSeats only if seatCapacity >= occupiedSeats + seatCount.
-      // This is the concurrency guard: two simultaneous requests race here;
-      // the losing one sees updatedCount=0 and gets CAPACITY_EXCEEDED.
       const [updatedCount] = await Vehicle.update(
-        { occupiedSeats: sequelize.literal(`occupiedSeats + ${rideReq.seatCount}`) },
+        { occupiedSeats: sequelize.literal(`occupiedSeats + ${candidate.seatCount}`) },
         {
           where: {
             id: vehicle.id,
             seatCapacity: {
-              [Op.gte]: sequelize.literal(`occupiedSeats + ${rideReq.seatCount}`),
+              [Op.gte]: sequelize.literal(`occupiedSeats + ${candidate.seatCount}`),
             },
           },
           transaction: t,
@@ -420,18 +366,7 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
         throw new Error('CAPACITY_EXCEEDED');
       }
 
-      // Re-check the private-ride rule now that this transaction holds the write lock:
-      // two accepts (a private and a shared one) could otherwise slip past the check
-      // above at the same time.
-      const onVehicle: any[] = await RideRequest.findAll({
-        where: { vehicleId: vehicle.id, status: { [Op.in]: [...POOL_JOINABLE_STATUSES] } },
-        transaction: t,
-      });
-      if (onVehicle.some((r: any) => !r.allowSharing) || (!rideReq.allowSharing && onVehicle.length > 0)) {
-        throw new Error('PRIVATE_CONFLICT');
-      }
-
-      // ── STEP 2: Atomically transition the ride to MATCHED ───────────────
+      // ── STEP 3: Atomically transition the ride to MATCHED ───────────────
       // WHERE status='REQUESTED' prevents double-acceptance by two drivers.
       const [reqUpdatedCount] = await RideRequest.update(
         {
@@ -440,7 +375,7 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
           driverId,
         },
         {
-          where: { id: rideReq.id, status: 'REQUESTED' },
+          where: { id: candidate.id, status: 'REQUESTED' },
           transaction: t,
         }
       );
@@ -449,10 +384,10 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
         throw new Error('ALREADY_TAKEN');
       }
 
-      // ── STEP 3: Recalculate pool fares for ALL passengers ───────────────
-      // Now that this ride is MATCHED (vehicleId is set), the pool has grown.
-      // Every current passenger is re-priced from their own base fare (70% each for 2
-      // passengers, 55% for 3); rides that have already STARTED keep their locked fare.
+      // ── STEP 4: Recalculate pool fares ──────────────────────────────────
+      // Now that this ride is MATCHED (vehicleId is set), the pool has grown. Everyone who has not
+      // started is re-priced from their own base fare (70% each for 2 passengers, 55% for 3);
+      // rides that have already STARTED keep their locked fare.
       await recalculatePoolFares(vehicle.id, t);
     });
 
@@ -463,16 +398,16 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
       rideRequest: formatRide(updated!.toJSON()),
     });
   } catch (error: any) {
-    console.error('Accept ride error:', error);
+    if (error instanceof PoolRejected) {
+      return res.status(409).json({ error: error.verdict.message, code: error.verdict.code });
+    }
     if (error.message === 'CAPACITY_EXCEEDED') {
       return res.status(409).json({ error: 'Not enough seats available.' });
-    }
-    if (error.message === 'PRIVATE_CONFLICT') {
-      return res.status(409).json({ error: 'Private rides cannot be pooled with other passengers.' });
     }
     if (error.message === 'ALREADY_TAKEN') {
       return res.status(409).json({ error: 'Ride request was already accepted.' });
     }
+    console.error('Accept ride error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

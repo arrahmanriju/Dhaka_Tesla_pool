@@ -321,15 +321,17 @@ describe('Pool fare split — Nusrat, Rafiq, Shirin and Jashim (Bullet)', () => 
       expect(await fareOf(nusratRide)).toBe(100);
     });
 
-    it('nobody can join after the trip has started, so no fare moves', async () => {
+    it('someone who joins after the trip has started pays the shared rate, and the started fare does not move', async () => {
       const nusratRide = await joinPool(nusrat);
       await driverAction(nusratRide, 'arrive');
       await driverAction(nusratRide, 'start');
 
       const late = await requestRide(rafiq);
       const res = await accept(late.body.rideRequest.id);
-      expect(res.status).toBe(409);
+      expect(res.status).toBe(200);
+      // Nusrat's ৳180 was locked at start; Rafiq joins a pool of 2, so he pays 70% of his own ৳180.
       expect(await fareOf(nusratRide)).toBe(180);
+      expect(await fareOf(late.body.rideRequest.id)).toBe(125);
     });
 
     it('finishing the trip does not change the fare, and history shows the locked amount', async () => {

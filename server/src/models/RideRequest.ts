@@ -22,21 +22,6 @@ export const MAX_SEATS_PER_RIDE = 3;
 /** Statuses that count as "the passenger has a ride in progress" (everything but the terminal states). */
 export const ACTIVE_RIDE_STATUSES = ['REQUESTED', 'MATCHED', 'DRIVER_ARRIVED', 'STARTED'] as const;
 
-// ---------------------------------------------------------------------------
-// Pool compatibility: two requests are pool-compatible if they share the same
-// pickup zone AND the same destination zone.
-//
-// We intentionally keep this simple (exact zone match) rather than using
-// geographic routing. This is easy to understand, test, and extend later.
-// ---------------------------------------------------------------------------
-export function areZonesCompatible(
-  existingDestination: string,
-  newDestination: string
-): boolean {
-  // Exact match only — same destination zone required to share a pool.
-  return existingDestination === newDestination;
-}
-
 /**
  * Ride status state machine:
  *   REQUESTED → MATCHED → DRIVER_ARRIVED → STARTED → COMPLETED
@@ -72,12 +57,9 @@ export const RIDE_STATUS_VALUES: RideStatus[] = [
 ];
 
 /**
- * Pool-joinable states: a driver can pool a new passenger onto a trip that
- * is in one of these states. Once the trip has STARTED no new passengers
- * are added.
- *
- * We include STARTED here so the pool-compatibility query finds it;
- * the accept route then checks r.status === 'STARTED' and rejects.
+ * Pool-joinable states: the rides on a vehicle that a new passenger has to be compatible with.
+ * STARTED is included on purpose: a trip that is already under way can still take passengers whose
+ * route runs the same way (see utils/pooling.ts and utils/routeDirection.ts).
  */
 export const POOL_JOINABLE_STATUSES: RideStatus[] = ['MATCHED', 'DRIVER_ARRIVED', 'STARTED'];
 
