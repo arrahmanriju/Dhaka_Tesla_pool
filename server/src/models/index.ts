@@ -6,6 +6,7 @@ import { RideRequest, initRideRequest } from './RideRequest';
 import { PasswordReset, initPasswordReset } from './PasswordReset';
 import { DriverProfile, initDriverProfile } from './DriverProfile';
 import { RideEvent, initRideEvent } from './RideEvent';
+import { RideDecline, initRideDecline } from './RideDecline';
 
 // Setup Sequelize for SQLite
 export const storagePath = process.env.DB_STORAGE_PATH || path.join(__dirname, '../../data/database.sqlite');
@@ -22,6 +23,7 @@ initRideRequest(sequelize);
 initPasswordReset(sequelize);
 initDriverProfile(sequelize);
 initRideEvent(sequelize);
+initRideDecline(sequelize);
 
 // Setup Associations
 User.hasMany(PasswordReset, { foreignKey: 'userId', onDelete: 'CASCADE' });
@@ -44,5 +46,5 @@ RideRequest.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
 RideRequest.hasMany(RideEvent, { foreignKey: 'rideRequestId', as: 'events' });
 RideEvent.belongsTo(RideRequest, { foreignKey: 'rideRequestId' });
 
-export { User, Vehicle, RideRequest, PasswordReset, DriverProfile, RideEvent };
+export { User, Vehicle, RideRequest, PasswordReset, DriverProfile, RideEvent, RideDecline };
 

@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { Op, Transaction } from 'sequelize';
-import { sequelize, User, RideRequest, Vehicle } from '../models';
+import { sequelize, User, RideRequest, Vehicle, RideDecline } from '../models';
 import {
   ACTIVE_RIDE_STATUSES,
   DHAKA_ZONES,
@@ -245,7 +245,8 @@ router.get('/me', async (req: Request, res: Response) => {
 //   A request is shown to a driver if ALL of the following hold:
 //   1. status = REQUESTED (not yet accepted by anyone)
 //   2. seatCount <= the vehicle's available seats
-//   3. checkPoolJoin() accepts it for the rides already on the vehicle (MATCHED, DRIVER_ARRIVED or
+//   3. this driver has not declined it
+//   4. checkPoolJoin() accepts it for the rides already on the vehicle (MATCHED, DRIVER_ARRIVED or
 //      STARTED): private rides are never mixed, and the route must run the same way as EVERY ride
 //      in the pool (utils/routeDirection.ts). An empty vehicle accepts any route.
 //
@@ -276,8 +277,16 @@ router.get('/pending', async (req: Request, res: Response) => {
     });
     const midTrip = pool.some((r: any) => r.status === 'STARTED');
 
+    // Requests this driver has already declined never come back to them.
+    const declined = await RideDecline.findAll({ where: { driverId }, attributes: ['rideRequestId'] });
+    const declinedIds = declined.map((d: any) => d.rideRequestId as string);
+
     const candidates: any[] = await RideRequest.findAll({
-      where: { status: 'REQUESTED', seatCount: { [Op.lte]: availableSeats } },
+      where: {
+        status: 'REQUESTED',
+        seatCount: { [Op.lte]: availableSeats },
+        ...(declinedIds.length > 0 ? { id: { [Op.notIn]: declinedIds } } : {}),
+      },
       order: [['createdAt', 'ASC']],
     });
     const compatible = candidates.filter((c: any) => checkPoolJoin(pool, c).ok);
@@ -414,6 +423,37 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
       return res.status(409).json({ error: 'Ride request was already accepted.' });
     }
     console.error('Accept ride error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /ride-requests/:id/decline   (driver login required)
+//
+// The driver dismisses a pending request. It stays REQUESTED for every other driver and stops
+// appearing in this driver's pending list. Declining twice is fine. A request that is no longer
+// REQUESTED (already taken or cancelled) gets 409.
+// ---------------------------------------------------------------------------
+router.post('/:id/decline', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    if (req.user!.role !== 'DRIVER') return res.status(403).json({ error: 'Only drivers can decline rides.' });
+    const driverId = req.user!.id;
+    const claimed = req.body?.driverId;
+    if (typeof claimed === 'string' && claimed !== driverId) {
+      return res.status(403).json({ error: 'You can only decline as yourself.' });
+    }
+
+    const rideReq: any = await RideRequest.findByPk(id);
+    if (!rideReq) return res.status(404).json({ error: 'Ride request not found.' });
+    if (rideReq.status !== 'REQUESTED') {
+      return res.status(409).json({ error: 'This request is no longer waiting for a driver.' });
+    }
+
+    await RideDecline.findOrCreate({ where: { rideRequestId: id, driverId } });
+    res.json({ message: 'Request declined.', rideId: id });
+  } catch (error) {
+    console.error('Decline ride error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
