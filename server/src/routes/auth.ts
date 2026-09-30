@@ -6,9 +6,9 @@ import { User, PasswordReset } from '../models';
 import { isValidEmail, isValidPassword, isValidName, normalizePhone, toAsciiDigits } from '../utils/validation';
 import { sendSms } from '../utils/sms';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
+import { getJwtSecret } from '../config/jwtSecret';
 
 const router = Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-mvp-key';
 const BCRYPT_ROUNDS = 10;
 
 // Password reset
@@ -22,7 +22,8 @@ const EXPOSE_RESET_CODE =
   process.env.NODE_ENV !== 'production' || process.env.RESET_CODE_IN_RESPONSE === 'true';
 
 const hashResetCode = (code: string) =>
-  crypto.createHmac('sha256', JWT_SECRET).update(code).digest('hex');
+  // The same secret as the login tokens (config/jwtSecret.ts): there is no built-in default, so it can never be a public value
+  crypto.createHmac('sha256', getJwtSecret()).update(code).digest('hex');
 
 const publicUser = (user: User) => ({
   id: user.id,
@@ -95,7 +96,7 @@ router.post('/signup', async (req: Request, res: Response) => {
     // --- Issue token ---
     const token = jwt.sign(
       { id: user.id, role: user.role, name: user.name, phone: user.phone, email: user.email },
-      JWT_SECRET,
+      getJwtSecret(),
       { expiresIn: '24h' }
     );
 
@@ -158,7 +159,7 @@ router.post('/login', async (req: Request, res: Response) => {
     // --- Issue token ---
     const token = jwt.sign(
       { id: user.id, role: user.role, name: user.name, phone: user.phone, email: user.email },
-      JWT_SECRET,
+      getJwtSecret(),
       { expiresIn: '24h' }
     );
 

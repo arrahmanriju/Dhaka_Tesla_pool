@@ -1,5 +1,30 @@
 # Dhaka Tesla Pool MVP
 
+## Running the app
+
+**`JWT_SECRET` must be set before the server starts.** It signs every login token and the password-reset codes. There is **no default**: the server refuses to start (and says how to fix it) if `JWT_SECRET` is missing, empty, shorter than 32 characters, or the old public default (`super-secret-mvp-key`), so a forgotten setting can never leave the app running on a value anyone could read in the repository. Never commit the real value.
+
+Generate one (a random value, 44 characters):
+
+```
+openssl rand -base64 32
+```
+
+No `openssl`? Node makes the same thing:
+
+```
+node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+```
+
+**Locally** (Node 20+), in two terminals:
+
+1. `cd server`, `cp ../.env.example .env`, and put your generated value after `JWT_SECRET=` in `server/.env` (this file is git-ignored). Then `npm install`, optionally `npm run seed` (demo passenger and driver accounts, password `password123`, for local use only), and `npm run dev`. The API is at http://localhost:3001 (`/health` answers when it is up).
+2. `cd client`, `npm install`, `npm run dev`, then open http://localhost:3000.
+
+**With Docker:** in the project root, `cp .env.example .env`, put your generated value after `JWT_SECRET=` in that `.env` (git-ignored), then `docker compose up --build`. `docker-compose.yml` reads `JWT_SECRET` from that file or from your shell environment and never contains it; `docker compose` stops with a clear message if it is not set. The app is at http://localhost:3000 and the API at http://localhost:3001.
+
+**On a hosting platform:** add an environment variable named exactly **`JWT_SECRET`**, with a value from the command above, in the platform's environment or secrets settings for the server service. Changing it later signs everyone out (existing tokens stop verifying) and invalidates any password-reset codes that were pending.
+
 ## Tesla Pooling
 This project supports ride-pooling. When drivers search for pending ride requests, they are filtered according to specific rules to ensure rides can be logically shared in a single vehicle.
 

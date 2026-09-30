@@ -24,6 +24,9 @@ services:
       - PORT=3001
       - NODE_ENV=development
       - DB_STORAGE_PATH=./data/database.sqlite
+      # Required, and never written in this file: docker compose reads it from the environment or from a .env file
+      # next to this one (see .env.example). Generate one with: openssl rand -base64 32
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is not set. Generate one with 'openssl rand -base64 32' and put it in .env next to docker-compose.yml, or export it}
     volumes:
       - ./server/data:/app/data
     networks:

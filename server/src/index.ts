@@ -7,6 +7,7 @@ import vehicleRoutes from './routes/vehicle';
 import rideRequestRoutes from './routes/rideRequest';
 import passengerRoutes from './routes/passenger';
 import qrRoutes from './routes/qr';
+import { requireJwtSecret } from './config/jwtSecret';
 import { closeStaleSessions } from './services/qrRides';
 import { sequelize, storagePath } from './models';
 import { UPLOADS_DIR } from './utils/onboarding';
@@ -76,6 +77,15 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
 export { app };
 
 if (require.main === module) {
+  // Refuse to start without a strong JWT_SECRET: it signs every login token and password-reset code, and there is
+  // deliberately no default (config/jwtSecret.ts). Fail here, loudly, before anything else runs.
+  try {
+    requireJwtSecret();
+  } catch (error) {
+    console.error(`\n${(error as Error).message}\n`);
+    process.exit(1);
+  }
+
   // Sync database and start server
   migrateUsersTable()
     .then(() => migrateRideRequestsTable())
