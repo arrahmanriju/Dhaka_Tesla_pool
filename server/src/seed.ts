@@ -2,6 +2,7 @@ import bcrypt from 'bcryptjs';
 import { sequelize, User, Vehicle, DriverProfile, RideRequest } from './models';
 import { ensureOneActiveRideIndex, markFaresInTaka } from './migrations';
 import { calculateBaseFare } from './utils/fareCalculator';
+import { recordRideEvent } from './utils/rideEvents';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -63,7 +64,7 @@ async function seed() {
     //    by one to watch the fare split:  ৳180 alone → ৳125 each with 2 → ৳100 each with 3.
     const soloFare = calculateBaseFare('Mohakhali', 'Badda', 1);
     for (const passengerId of passengerIds) {
-      await RideRequest.create({
+      const ride = await RideRequest.create({
         passengerId,
         pickupZone: 'Mohakhali',
         destinationZone: 'Badda',
@@ -74,6 +75,7 @@ async function seed() {
         poolDiscount: 0,
         status: 'REQUESTED',
       });
+      await recordRideEvent(ride, 'REQUESTED', null, { id: passengerId, role: 'PASSENGER' });
     }
     console.log(`Created 3 ride requests Mohakhali → Badda at ৳${soloFare} each (Nusrat, Rafiq, Shirin)`);
 
