@@ -271,6 +271,8 @@ export interface FareBreakdown {
   fare: number;
   fullTripEstimate?: number | null;
   final?: boolean;
+  /** Only on a ride that ended CANCELLED_IN_TRANSIT: the fare is half of what the passenger was quoted, not worked out from stretches */
+  cancellation?: { rule: 'HALF_OF_QUOTED_FARE'; quotedFare: number | null };
 }
 
 export interface Vehicle {
