@@ -4,12 +4,13 @@ import { useRouter } from 'next/navigation';
 import { AppNav } from '@/components/AppNav';
 import { StatusBadge } from '@/components/StatusBadge';
 import { RideStatusCard } from '@/components/RideStatusCard';
+import { StreetRideTab } from '@/components/StreetRide';
 import { LoadingScreen, EmptyState, ErrorBanner, ErrorState, SuccessBanner, SeatCount, PassengerFare } from '@/components/UI';
 import { passengerApi, type FareEstimate, type PaymentMethod, type Ride, type User, ApiError } from '@/lib/api';
 import { getUser } from '@/lib/auth';
 import { usePreferences, useFormatApiError } from '@/lib/preferences';
 
-type Tab = 'request' | 'active' | 'history';
+type Tab = 'request' | 'active' | 'history' | 'street';
 
 export default function PassengerDashboard() {
   const router = useRouter();
@@ -18,6 +19,8 @@ export default function PassengerDashboard() {
   const [tab, setTab] = useState<Tab>('active');
   // Shown on the status tab right after a ride is requested.
   const [justRequested, setJustRequested] = useState(false);
+  // A link like /passenger?code=BULLET (a QR that holds a link) opens the Street Ride tab with the code filled in
+  const [streetCode, setStreetCode] = useState('');
 
   useEffect(() => {
     const u = getUser();
@@ -26,6 +29,8 @@ export default function PassengerDashboard() {
       return;
     }
     setUser(u);
+    const code = new URLSearchParams(window.location.search).get('code');
+    if (code) { setStreetCode(code); setTab('street'); }
   }, [router]);
 
   if (!user) return <LoadingScreen label={t('loading.passenger')} />;
@@ -40,6 +45,7 @@ export default function PassengerDashboard() {
           {([
             { id: 'active',  label: `🚦 ${t('p.tab.active')}` },
             { id: 'request', label: `➕ ${t('p.tab.request')}` },
+            { id: 'street',  label: `🛺 ${t('p.tab.street')}` },
             { id: 'history', label: `🕓 ${t('p.tab.history')}` },
           ] as { id: Tab; label: string }[]).map((t) => (
             <button
@@ -65,6 +71,7 @@ export default function PassengerDashboard() {
         {tab === 'active'   && (
           <ActiveRidesTab onNavigate={setTab} justRequested={justRequested} />
         )}
+        {tab === 'street'   && <StreetRideTab initialCode={streetCode} />}
         {tab === 'history'  && <HistoryTab />}
       </div>
     </div>

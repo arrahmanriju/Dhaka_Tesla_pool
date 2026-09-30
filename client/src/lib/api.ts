@@ -366,6 +366,62 @@ export const passengerApi = {
     request<{ message: string; status: string }>(`/passenger/rides/${rideId}/cancel`, { method: 'PATCH' }),
 };
 
+// ─── Street rides by QR code ─────────────────────────────────────────────────
+// For drivers with no smartphone: the driver does nothing; every step is the passenger's.
+
+export type QRParticipantStatus = 'RIDING' | 'ARRIVED' | 'AUTO_COMPLETED';
+
+export interface QRVehiclePreview {
+  vehicleCode: string;
+  vehicle: { nickname: string; seatCapacity: number; seatsFree: number };
+  /** The ride already open in this vehicle, if any */
+  session: { id: string; passengerCount: number } | null;
+}
+
+export interface QRSession {
+  id: string;
+  status: 'OPEN' | 'CLOSED';
+  openedAt: string;
+  closedAt: string | null;
+  /** ALL_ARRIVED: everyone confirmed. TIMEOUT: nobody closed it, so it was closed automatically. */
+  closeReason: 'ALL_ARRIVED' | 'TIMEOUT' | null;
+  autoCloseAfterMinutes: number;
+  vehicle: { vehicleCode: string | null; nickname: string | null; seatCapacity: number | null; seatsFree: number | null };
+  you: {
+    passengerNumber: number;
+    pickupZone: string;
+    destinationZone: string;
+    seatCount: number;
+    status: QRParticipantStatus;
+    joinedAt: string;
+    exitedAt: string | null;
+    baseFare: number;
+    /** A running estimate while riding; the final fare once they have arrived (`fareFinal`) */
+    fare: number | null;
+    fareFinal: boolean;
+    poolDiscount: number | null;
+    fareBreakdown: FareBreakdown;
+    /** Always cash: the driver has no wallet */
+    payment: { method: 'cash'; status: 'NOT_DUE' | 'CASH_DUE'; amount: number | null };
+  };
+  /** Everyone else appears only as "Passenger N": no names, routes or fares */
+  passengers: { label: string; isYou: boolean; status: QRParticipantStatus }[];
+}
+
+export const qrApi = {
+  /** What is shown after scanning, before joining. */
+  preview: (code: string) => request<QRVehiclePreview>(`/qr/vehicles/${encodeURIComponent(code)}`),
+
+  join: (input: { vehicleCode: string; pickupZone: string; destinationZone: string; seatCount?: number; sessionId?: string }) =>
+    request<{ session: QRSession }>('/qr/join', { method: 'POST', body: JSON.stringify(input) }),
+
+  /** The passenger's latest street ride (open or finished), or null. */
+  mine: () => request<{ session: QRSession | null }>('/qr/sessions/mine'),
+
+  /** "I've arrived": the passenger ends their own leg. No driver confirmation exists. */
+  arrived: (sessionId: string) => request<{ session: QRSession }>(`/qr/sessions/${sessionId}/arrived`, { method: 'POST', body: JSON.stringify({}) }),
+};
+
 // ─── Driver APIs ─────────────────────────────────────────────────────────────
 
 export const driverApi = {
