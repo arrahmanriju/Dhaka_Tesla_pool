@@ -1,4 +1,4 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import authRoutes from './routes/auth';
@@ -50,6 +50,22 @@ app.use('/passenger', passengerRoutes);
 // Health check endpoint
 app.get('/health', (req: Request, res: Response) => {
   res.status(200).json({ status: 'ok', service: 'dhaka-tesla-pool-backend' });
+});
+
+// Errors always leave as JSON with a human-readable `error`, never as Express's default HTML page: the
+// client shows that text (or a friendly fallback by status), so it must always be there.
+app.use((_req: Request, res: Response) => {
+  res.status(404).json({ error: 'That address does not exist.', code: 'NOT_FOUND' });
+});
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  if (err?.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'That upload is too large.', code: 'TOO_LARGE' });
+  }
+  if (err?.type === 'entity.parse.failed' || err instanceof SyntaxError) {
+    return res.status(400).json({ error: 'The request could not be read.', code: 'BAD_REQUEST' });
+  }
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 // Export app for testing
