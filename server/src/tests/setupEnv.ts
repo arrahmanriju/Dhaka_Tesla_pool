@@ -8,3 +8,7 @@ import path from 'path';
 const dir = path.join(os.tmpdir(), 'tesla-pool-tests', `worker-${process.env.JEST_WORKER_ID ?? '0'}`);
 fs.mkdirSync(dir, { recursive: true });
 process.env.DB_STORAGE_PATH = path.join(dir, 'database.sqlite');
+
+// There is no built-in JWT secret (config/jwtSecret.ts): the suites use this throwaway value, which is only ever
+// used to sign tokens for the in-memory test users. A JWT_SECRET already in the environment is left alone.
+process.env.JWT_SECRET ??= 'test-only-jwt-secret-never-used-outside-the-jest-suites-000';

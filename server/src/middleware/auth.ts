@@ -1,7 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-
-const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-mvp-key';
+import { getJwtSecret } from '../config/jwtSecret';
 
 export interface AuthenticatedRequest extends Request {
   user?: {
@@ -33,7 +32,7 @@ export function authenticateToken(
   }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as {
+    const decoded = jwt.verify(token, getJwtSecret()) as {
       id: string;
       role: 'DRIVER' | 'PASSENGER';
       name: string;
