@@ -64,7 +64,8 @@ function getDistance(pickup: DhakaZone, dropoff: DhakaZone): number {
 
 /** Rounds a taka amount to the nearest ৳5 (halves round up). */
 export function roundToNearest5(taka: number): number {
-  return Math.floor((taka + FARE_ROUNDING_BDT / 2) / FARE_ROUNDING_BDT) * FARE_ROUNDING_BDT;
+  // (taka + 2.5) / 5 written as (2 × taka + 5) / 10, so a whole-taka input never goes through a fraction
+  return Math.floor((2 * taka + FARE_ROUNDING_BDT) / (2 * FARE_ROUNDING_BDT)) * FARE_ROUNDING_BDT;
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +114,20 @@ export function calculateBaseFare(pickup: string, dropoff: string, seatCount: nu
 //           fare = 100 + 180 + 98 = ৳378 → ৳380      (riding alone all the way: 100 + 320 = ৳420)
 //   Rafiq:  Mirpur → Dhanmondi ৳140 × 70% = ৳98;  fare = 100 + 98 = ৳198 → ৳200   (alone: 100 + 140 = ৳240)
 // ---------------------------------------------------------------------------
+
+/**
+ * `percent` % of a whole-taka amount, as a whole number of taka. Fails loudly instead of truncating:
+ * a distance charge is km × ৳20 × seats, always a multiple of 20, and the rates are 100, 70 and 55, so
+ * the result is always exact. If that ever stops being true (a new rate, a fractional distance) this
+ * throws rather than silently losing a fraction of a taka.
+ */
+export function percentOf(amount: number, percent: number): number {
+  const product = amount * percent;
+  if (!Number.isSafeInteger(product) || product % 100 !== 0) {
+    throw new Error(`${percent}% of ৳${amount} is not a whole number of taka`);
+  }
+  return product / 100;
+}
 
 /** Distance for one segment: 0 within a zone, otherwise the table distance. */
 export function segmentDistanceKm(from: string, to: string): number {
@@ -183,7 +198,7 @@ export function segmentFare(input: {
       distanceCharge,
       passengers: from.passengerCount,
       ratePercent,
-      charge: Math.floor((distanceCharge * ratePercent) / 100),
+      charge: percentOf(distanceCharge, ratePercent),
     };
   });
 

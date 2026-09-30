@@ -29,8 +29,8 @@ export const initWalletTransaction = (sequelize: any) => {
       userId: { type: DataTypes.UUID, allowNull: false, references: { model: 'Users', key: 'id' } },
       rideRequestId: { type: DataTypes.UUID, allowNull: false, unique: true, references: { model: 'RideRequests', key: 'id' } },
       type: { type: DataTypes.ENUM('DEBIT'), allowNull: false },
-      amount: { type: DataTypes.INTEGER, allowNull: false, validate: { min: 0 } },
-      balanceAfter: { type: DataTypes.INTEGER, allowNull: false, validate: { min: 0 } },
+      amount: { type: DataTypes.INTEGER, allowNull: false, validate: { min: 0, isInt: true } },
+      balanceAfter: { type: DataTypes.INTEGER, allowNull: false, validate: { min: 0, isInt: true } },
     },
     { sequelize, tableName: 'WalletTransactions', updatedAt: false }
   );

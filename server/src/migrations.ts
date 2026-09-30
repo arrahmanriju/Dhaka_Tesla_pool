@@ -139,7 +139,9 @@ export async function migrateFaresToTaka(): Promise<void> {
   }
 
   // Conversion and the version stamp commit together, on one connection (plain BEGIN/COMMIT).
-  const toTaka = (column: string) => `\`${column}\` = CAST(ROUND(\`${column}\` / 500.0) AS INTEGER) * 5`; // paisa/100, nearest 5
+  // paisa / 100, rounded to the nearest ৳5 (halves up), in pure integer arithmetic: (x + 250) / 500 is an
+  // integer division in SQLite, so no fraction is ever involved.
+  const toTaka = (column: string) => `\`${column}\` = ((\`${column}\` + 250) / 500) * 5`;
   await sequelize.query('BEGIN');
   try {
     await sequelize.query(

@@ -63,7 +63,7 @@ export const initUser = (sequelize: any) => {
         type: DataTypes.INTEGER,
         allowNull: false,
         defaultValue: 0,
-        validate: { min: 0 },
+        validate: { min: 0, isInt: true }, // whole taka only
       },
     },
     {

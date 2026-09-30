@@ -45,11 +45,13 @@ export async function collectPayment(
   fare: number,
   transaction: Transaction | null = null
 ): Promise<PaymentStatus> {
+  // Money is a whole number of taka: refuse anything else instead of truncating it.
+  if (!Number.isSafeInteger(fare) || fare < 0) throw new Error(`Invalid amount: ${fare}`);
   let status: PaymentStatus;
 
   if (ride.paymentMethod === 'wallet') {
     const [debited] = await User.update(
-      { walletBalance: sequelize.literal(`walletBalance - ${Math.trunc(fare)}`) },
+      { walletBalance: sequelize.literal(`walletBalance - ${fare}`) },
       { where: { id: ride.passengerId, walletBalance: { [Op.gte]: fare } }, transaction }
     );
     if (debited === 1) {

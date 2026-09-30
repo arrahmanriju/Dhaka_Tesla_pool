@@ -183,16 +183,19 @@ export const initRideRequest = (sequelize: any) => {
         type: DataTypes.INTEGER, // whole taka — set at creation, never changes
         allowNull: false,
         defaultValue: 0,
+        validate: { isInt: true }, // whole taka only: SQLite would store 12.5 in an INTEGER column
       },
       estimatedFare: {
         type: DataTypes.INTEGER, // whole taka — an estimate until the journey ends, then final
         allowNull: false,
         defaultValue: 0,
+        validate: { isInt: true },
       },
       poolDiscount: {
         type: DataTypes.INTEGER, // whole taka saved by sharing (baseFare − estimatedFare)
         allowNull: false,
         defaultValue: 0,
+        validate: { isInt: true },
       },
       cancellationZone: {
         type: DataTypes.ENUM(...DHAKA_ZONES),
@@ -211,6 +214,7 @@ export const initRideRequest = (sequelize: any) => {
       paymentAmount: {
         type: DataTypes.INTEGER, // whole taka, set when the journey ends
         allowNull: true,
+        validate: { isInt: true },
       },
       status: {
         type: DataTypes.ENUM(...RIDE_STATUS_VALUES),

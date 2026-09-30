@@ -46,8 +46,8 @@ export const initRideEvent = (sequelize: any) => {
       poolSize: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
       ridersOnboard: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
       cancellationZone: { type: DataTypes.STRING, allowNull: true },
-      chargedFare: { type: DataTypes.INTEGER, allowNull: true },
-      fullTripEstimate: { type: DataTypes.INTEGER, allowNull: true },
+      chargedFare: { type: DataTypes.INTEGER, allowNull: true, validate: { isInt: true } },
+      fullTripEstimate: { type: DataTypes.INTEGER, allowNull: true, validate: { isInt: true } },
     },
     { sequelize, tableName: 'RideEvents', updatedAt: false }
   );
