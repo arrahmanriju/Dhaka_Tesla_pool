@@ -4,7 +4,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { AppNav } from '@/components/AppNav';
 import { StatusBadge } from '@/components/StatusBadge';
-import { MidTripOffers } from '@/components/MidTripOffers';
+import { MidTripOffers, MID_TRIP_POLL_MS } from '@/components/MidTripOffers';
 import { PoolTimeline } from '@/components/PoolTimeline';
 import { LoadingScreen, EmptyState, ErrorBanner, SuccessBanner, Spinner, SeatCount } from '@/components/UI';
 import { driverApi, ApiError, type Ride, type Vehicle } from '@/lib/api';
@@ -133,21 +133,33 @@ function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline
   const [error, setError] = useState('');
   const [accepting, setAccepting] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState('');
+  // true while one of this driver's rides is STARTED (reported by the server with the list)
+  const [midTrip, setMidTrip] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true); setError('');
+  // `silent` refreshes in the background: no spinner, and a failed refresh keeps the list on screen.
+  // The server only returns requests that fit the vehicle, so nothing is filtered here.
+  const load = useCallback(async (silent = false) => {
+    if (!silent) { setLoading(true); setError(''); }
     try {
       const res = await driverApi.getPendingRides(driverId);
       setRides(res.rides);
       setNoVehicle(res.noVehicle);
+      setMidTrip(res.midTrip);
     } catch (err: any) {
-      setError(formatError(err));
+      if (!silent) setError(formatError(err));
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [driverId, formatError]);
 
   useEffect(() => { load(); }, [load]);
+
+  // While a trip is under way new compatible riders can appear at any time: keep polling (no websockets).
+  useEffect(() => {
+    if (!midTrip) return;
+    const timer = setInterval(() => { if (!document.hidden) load(true); }, MID_TRIP_POLL_MS);
+    return () => clearInterval(timer);
+  }, [midTrip, load]);
 
   const handleAccept = async (rideId: string) => {
     setAccepting(rideId); setError(''); setSuccessMsg('');
@@ -171,7 +183,7 @@ function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline
           <h1 className="section-title">{t('d.pending.title')}</h1>
           <p className="section-desc">{t('d.pending.desc')}</p>
         </div>
-        <button className="btn btn--ghost btn--sm" onClick={load} id="refresh-pending">{t('common.refresh')}</button>
+        <button className="btn btn--ghost btn--sm" onClick={() => load()} id="refresh-pending">{t('common.refresh')}</button>
       </div>
 
       {!isOnline && !noVehicle && (
@@ -181,6 +193,11 @@ function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline
       )}
       {error && <ErrorBanner message={error} />}
       {successMsg && <SuccessBanner message={successMsg} />}
+      {midTrip && !noVehicle && (
+        <p className="form-hint" id="pending-live" aria-live="polite" style={{ marginBottom: 12 }}>
+          🔄 {t('d.pending.live', { sec: MID_TRIP_POLL_MS / 1000 })}
+        </p>
+      )}
 
       {noVehicle ? (
         <EmptyState
@@ -208,6 +225,7 @@ function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline
                 <span className="ride-card__arrow">→</span>
                 <span className="ride-card__zone">{tz(ride.destinationZone)}</span>
                 <StatusBadge status={ride.status} />
+                {ride.joinsMidTrip && <span className="badge badge--matched">{t('d.offers.midTrip')}</span>}
               </div>
               <div className="ride-card__meta">
                 <span className="ride-card__meta-item">

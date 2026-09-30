@@ -107,6 +107,20 @@ describe('Mid-trip pooling — Jashim (Bullet, 3 seats), Nusrat, Rafiq, Shirin',
       expect(res.body.requests.find((r: any) => r.id === rafiqReq.body.rideRequest.id).joinsMidTrip).toBe(true);
     });
 
+    it('polling: a request made while the trip is under way appears on the next poll; an incompatible one never does', async () => {
+      await nusratIsTravelling();
+      const first = await pending();
+      expect(first.body).toMatchObject({ midTrip: true, requests: [] });
+
+      const unrelated = await requestRide(shirin, { pickupZone: 'Mohakhali', destinationZone: 'Dhanmondi' });
+      expect((await pending()).body.requests).toEqual([]); // the server never sends it
+
+      const fits = await requestRide(rafiq, { pickupZone: 'Mohakhali', destinationZone: 'Gulshan 1' });
+      const next = await pending();
+      expect(next.body.requests.map((r: any) => r.id)).toEqual([fits.body.rideRequest.id]);
+      expect(JSON.stringify(next.body)).not.toContain(unrelated.body.rideRequest.id);
+    });
+
     it('is not mid-trip before anyone has started', async () => {
       await joinPool(nusrat);
       await requestRide(rafiq, { pickupZone: 'Mohakhali', destinationZone: 'Gulshan 1' });
