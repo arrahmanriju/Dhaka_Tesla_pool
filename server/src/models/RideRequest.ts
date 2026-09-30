@@ -112,18 +112,21 @@ export class RideRequest extends Model {
   /** false = private ride: never pooled with other passengers. */
   public allowSharing!: boolean;
 
-  /** Full fare before pool discount — integer paisa. Set at creation; never changes. */
+  /**
+   * This passenger's OWN fare when riding alone (their pickup → destination) — whole taka.
+   * Set at creation; never changes.
+   */
   public baseFare!: number;
 
   /**
-   * Final fare charged to this passenger — integer paisa.
-   * Recalculated whenever pool membership changes:
-   *   - When a second passenger joins → reduced by POOL_DISCOUNT
-   *   - When solo again (co-passenger cancelled) → reverted to baseFare
+   * What this passenger pays — whole taka, a multiple of ৳5.
+   *   estimatedFare = baseFare × share rate (100% alone, 70% with 2 passengers, 55% with 3)
+   * Recalculated whenever pool membership changes (see utils/poolFares.ts), and LOCKED once the
+   * ride is STARTED. A private ride (allowSharing = false) always pays 100%.
    */
   public estimatedFare!: number;
 
-  /** Pool discount applied to this passenger — integer paisa. 0 when riding alone. */
+  /** What this passenger saves by sharing (baseFare − estimatedFare) — whole taka. 0 when riding alone. */
   public poolDiscount!: number;
 
   public status!: RideStatus;
@@ -173,17 +176,17 @@ export const initRideRequest = (sequelize: any) => {
         defaultValue: true,
       },
       baseFare: {
-        type: DataTypes.INTEGER, // paisa — set at creation, never changes
+        type: DataTypes.INTEGER, // whole taka — set at creation, never changes
         allowNull: false,
         defaultValue: 0,
       },
       estimatedFare: {
-        type: DataTypes.INTEGER, // paisa — recalculated when pool changes
+        type: DataTypes.INTEGER, // whole taka — recalculated when the pool changes, locked at STARTED
         allowNull: false,
         defaultValue: 0,
       },
       poolDiscount: {
-        type: DataTypes.INTEGER, // paisa discount applied to this passenger
+        type: DataTypes.INTEGER, // whole taka saved by sharing (baseFare − estimatedFare)
         allowNull: false,
         defaultValue: 0,
       },

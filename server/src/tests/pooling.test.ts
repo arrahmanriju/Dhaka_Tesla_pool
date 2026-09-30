@@ -1,16 +1,17 @@
 /**
  * Pooling test suite — covers all cases A–J specified in the PRD.
  *
- * Fare formula (reference):
- *   baseFare       = 100 BDT
- *   distanceCharge = distanceKm × 20 BDT × seatCount
- *   poolDiscount   = 30 BDT per passenger when poolSize >= 2, else 0
- *   fare           = baseFare + distanceCharge - poolDiscount  (minimum 100 BDT)
- *   stored in integer paisa (× 100)
+ * Fare model (reference) — money is whole taka, rounded to the nearest ৳5:
+ *   base fare      = 100 + distanceKm × 20 × seatCount        (the passenger's OWN route)
+ *   passenger fare = base fare × share rate
+ *   share rate     = 100% alone · 70% with 2 passengers · 55% with 3
+ *   poolDiscount   = base fare − passenger fare (what sharing saves them)
  *
- * Gulshan → Banani = 2 km
- *   Solo (1 seat):   100 + (2×20×1) - 0  = 140 BDT = 14 000 paisa
- *   Pooled (1 seat): 100 + (2×20×1) - 30 = 110 BDT = 11 000 paisa
+ * Gulshan → Banani = 2 km → base ৳140
+ *   Solo:            140          = ৳140
+ *   Pooled (2):      140 × 70% = 98  → ৳100 each (saves ৳40)
+ *
+ * The full 1 / 2 / 3-passenger story, the fare lock and rounding live in poolFare.test.ts.
  */
 
 import request from 'supertest';
@@ -100,27 +101,27 @@ describe('Pooling — all cases A–J', () => {
     expect(r1.status).toBe(201);
     expect(r2.status).toBe(201);
 
-    // Solo fare before pooling: 100 + (2×20×1) - 0 = 140 BDT = 14 000 paisa
-    expect(r1.body.rideRequest.estimatedFare).toBe(14000);
-    expect(r2.body.rideRequest.estimatedFare).toBe(14000);
+    // Solo fare before pooling: 100 + (2×20×1) = ৳140
+    expect(r1.body.rideRequest.estimatedFare).toBe(140);
+    expect(r2.body.rideRequest.estimatedFare).toBe(140);
 
     // Driver accepts P1 → solo, no discount yet
     const acc1 = await acceptRide(app, r1.body.rideRequest.id, driver.id);
     expect(acc1.status).toBe(200);
-    expect(acc1.body.rideRequest.estimatedFare).toBe(14000);
+    expect(acc1.body.rideRequest.estimatedFare).toBe(140);
     expect(acc1.body.rideRequest.poolDiscount).toBe(0);
 
     // Driver accepts P2 → now 2 in pool, BOTH should be discounted
     const acc2 = await acceptRide(app, r2.body.rideRequest.id, driver.id);
     expect(acc2.status).toBe(200);
-    // P2's fare: 100 + 40 - 30 = 110 BDT = 11 000 paisa
-    expect(acc2.body.rideRequest.estimatedFare).toBe(11000);
-    expect(acc2.body.rideRequest.poolDiscount).toBe(3000); // 30 BDT
+    // P2's fare: 70% of 140 = 98 → ৳100, saving ৳40
+    expect(acc2.body.rideRequest.estimatedFare).toBe(100);
+    expect(acc2.body.rideRequest.poolDiscount).toBe(40);
 
     // P1's fare must also have been recalculated
     const p1Ride = await RideRequest.findByPk(r1.body.rideRequest.id);
-    expect((p1Ride as any).estimatedFare).toBe(11000);
-    expect((p1Ride as any).poolDiscount).toBe(3000);
+    expect((p1Ride as any).estimatedFare).toBe(100);
+    expect((p1Ride as any).poolDiscount).toBe(40);
 
     // Passenger view should show shared ride badge and co-passengers
     const activeRes = await request(app)
@@ -130,7 +131,7 @@ describe('Pooling — all cases A–J', () => {
     expect(activeRide.isSharedRide).toBe(true);
     expect(activeRide.coPassengers).toBe(1);
     expect(activeRide.poolDiscountApplied).toBe(true);
-    expect(activeRide.estimatedFare).toBe(11000);
+    expect(activeRide.estimatedFare).toBe(100);
     // Driver name should be present
     expect(activeRide.driverName).toBeTruthy();
     // Vehicle should be present
@@ -206,8 +207,8 @@ describe('Pooling — all cases A–J', () => {
     // Both should now have discounted fare
     let p1Ride = await RideRequest.findByPk(r1.body.rideRequest.id);
     let p2Ride = await RideRequest.findByPk(r2.body.rideRequest.id);
-    expect((p1Ride as any).estimatedFare).toBe(11000);
-    expect((p2Ride as any).estimatedFare).toBe(11000);
+    expect((p1Ride as any).estimatedFare).toBe(100);
+    expect((p2Ride as any).estimatedFare).toBe(100);
 
     // P1 cancels
     const cancelRes = await request(app)
@@ -218,7 +219,7 @@ describe('Pooling — all cases A–J', () => {
     // P2's ride must still be MATCHED and fare reverted to solo price
     p2Ride = await RideRequest.findByPk(r2.body.rideRequest.id);
     expect((p2Ride as any).status).toBe('MATCHED');
-    expect((p2Ride as any).estimatedFare).toBe(14000); // back to solo fare
+    expect((p2Ride as any).estimatedFare).toBe(140); // back to the solo fare
     expect((p2Ride as any).poolDiscount).toBe(0);
 
     // P1's ride is CANCELLED
@@ -246,9 +247,9 @@ describe('Pooling — all cases A–J', () => {
       .send({ passengerId: p2.id });
     expect(cancelRes.status).toBe(200);
 
-    // P1's fare should revert to 14 000 paisa (solo)
+    // P1's fare should revert to the solo ৳140
     const p1Ride = await RideRequest.findByPk(r1.body.rideRequest.id);
-    expect((p1Ride as any).estimatedFare).toBe(14000);
+    expect((p1Ride as any).estimatedFare).toBe(140);
     expect((p1Ride as any).poolDiscount).toBe(0);
   });
 
@@ -409,15 +410,15 @@ describe('Pooling — all cases A–J', () => {
   // =========================================================================
   // FARE FORMULA VERIFICATION (explicit numbers)
   // =========================================================================
-  it('Fare formula: Gulshan→Banani solo=14000 paisa, pooled=11000 paisa', async () => {
+  it('Fare formula: Gulshan→Banani solo=৳140, pooled=৳100 (70% of 140, rounded to ৳5)', async () => {
     const driver = await createDriver('F1');
     const p1 = await createPassenger('F-P1');
     const p2 = await createPassenger('F-P2');
     await createVehicle(driver.id, 4);
 
     const r1 = await requestRide(app, p1.id, 'Gulshan', 'Banani', 1);
-    // Solo fare: 100 + (2km × 20 × 1) - 0 = 140 BDT = 14 000 paisa
-    expect(r1.body.rideRequest.estimatedFare).toBe(14000);
+    // Solo fare: 100 + (2km × 20 × 1) = ৳140
+    expect(r1.body.rideRequest.estimatedFare).toBe(140);
     expect(r1.body.rideRequest.poolDiscount).toBe(0);
 
     await acceptRide(app, r1.body.rideRequest.id, driver.id);
@@ -425,12 +426,12 @@ describe('Pooling — all cases A–J', () => {
     const r2 = await requestRide(app, p2.id, 'Gulshan', 'Banani', 1);
     await acceptRide(app, r2.body.rideRequest.id, driver.id);
 
-    // After pool: 100 + 40 - 30 = 110 BDT = 11 000 paisa each
+    // After pool: 70% of 140 = 98 → ৳100 each, saving ৳40 each
     const p1Final = await RideRequest.findByPk(r1.body.rideRequest.id);
     const p2Final = await RideRequest.findByPk(r2.body.rideRequest.id);
-    expect((p1Final as any).estimatedFare).toBe(11000);
-    expect((p2Final as any).estimatedFare).toBe(11000);
-    expect((p1Final as any).poolDiscount).toBe(3000); // 30 BDT in paisa
-    expect((p2Final as any).poolDiscount).toBe(3000);
+    expect((p1Final as any).estimatedFare).toBe(100);
+    expect((p2Final as any).estimatedFare).toBe(100);
+    expect((p1Final as any).poolDiscount).toBe(40);
+    expect((p2Final as any).poolDiscount).toBe(40);
   });
 });

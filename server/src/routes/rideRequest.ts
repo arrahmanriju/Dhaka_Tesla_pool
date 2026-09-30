@@ -9,61 +9,11 @@ import {
   POOL_JOINABLE_STATUSES,
   areZonesCompatible,
 } from '../models/RideRequest';
-import {
-  calculateFareForPassenger,
-  estimateFare,
-  POOL_DISCOUNT_BDT,
-} from '../utils/fareCalculator';
+import { calculateBaseFare, estimateFare, shareRatePercent } from '../utils/fareCalculator';
+import { isFareLocked, recalculatePoolFares } from '../utils/poolFares';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
 
 const router = Router();
-
-// ---------------------------------------------------------------------------
-// HELPER: recalculatePoolFares
-//
-// Call this inside a transaction whenever the number of active passengers in
-// a pool changes (second passenger joins, or a passenger cancels).
-//
-// poolSize = the NEW number of distinct passengers still in the pool.
-//
-// POOL DISCOUNT RULE:
-//   poolSize >= 2  → discount = POOL_DISCOUNT_BDT × 100 paisa per passenger
-//   poolSize == 1  → discount = 0 (back to full fare)
-//
-// We update every ACTIVE (non-terminal) ride in the pool so they all see
-// the same discount decision.
-// ---------------------------------------------------------------------------
-async function recalculatePoolFares(
-  vehicleId: string,
-  sequelizeInstance: any,
-  transaction: any
-): Promise<void> {
-  // All non-cancelled, non-completed rides on this vehicle
-  const activeRides: any[] = await RideRequest.findAll({
-    where: {
-      vehicleId,
-      status: { [Op.notIn]: ['CANCELLED', 'COMPLETED'] },
-    },
-    transaction,
-  });
-
-  const poolSize = activeRides.length;
-
-  for (const ride of activeRides) {
-    const newFare = calculateFareForPassenger(
-      ride.pickupZone,
-      ride.destinationZone,
-      ride.seatCount,
-      poolSize
-    );
-    const newDiscount = poolSize >= 2 ? POOL_DISCOUNT_BDT * 100 : 0;
-
-    await RideRequest.update(
-      { estimatedFare: newFare, poolDiscount: newDiscount },
-      { where: { id: ride.id }, transaction }
-    );
-  }
-}
 
 // ---------------------------------------------------------------------------
 // HELPER: format a RideRequest for the API response
@@ -78,11 +28,13 @@ function formatRide(r: any) {
     destinationZone: r.destinationZone,
     seatCount: r.seatCount,
     allowSharing: r.allowSharing,
+    // Money is whole taka. baseFare = the fare riding alone; estimatedFare = what this passenger
+    // pays right now; poolDiscount = what they save by sharing (baseFare − estimatedFare).
     baseFare: r.baseFare,
     estimatedFare: r.estimatedFare,
-    estimatedFareBDT: (r.estimatedFare / 100).toFixed(2),
     poolDiscount: r.poolDiscount,
-    poolDiscountBDT: (r.poolDiscount / 100).toFixed(2),
+    // true once the trip has started: the fare can no longer change
+    fareLocked: isFareLocked(r.status),
     status: r.status,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
@@ -185,18 +137,16 @@ router.get('/estimate', authenticateToken, (req: AuthenticatedRequest, res: Resp
     return res.status(400).json({ error: Object.values(result.fields)[0], code: 'VALIDATION', fields: result.fields });
   }
 
-  const { fare, poolFare } = estimateFare(
-    result.input.pickupZone,
-    result.input.destinationZone,
-    result.input.seatCount,
-    result.input.allowSharing
+  // Whole taka. `fare` is the price riding alone; `tiers` is the (lower) price as 2 or 3
+  // passengers share. A private ride has no tiers.
+  res.json(
+    estimateFare(
+      result.input.pickupZone,
+      result.input.destinationZone,
+      result.input.seatCount,
+      result.input.allowSharing
+    )
   );
-  res.json({
-    fare,
-    fareBDT: (fare / 100).toFixed(2),
-    poolFare,
-    poolFareBDT: poolFare === null ? null : (poolFare / 100).toFixed(2),
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -207,7 +157,7 @@ router.get('/estimate', authenticateToken, (req: AuthenticatedRequest, res: Resp
 // nobody can book a ride in someone else's name. Name and phone stay on the account.
 //
 // Rules: valid zones, different zones, 1–3 seats, one active ride per passenger.
-// Fare is calculated solo (poolSize=1); it drops when a second passenger joins.
+// Fare starts as the passenger's own base fare (riding alone); it drops when others join.
 // ---------------------------------------------------------------------------
 router.post('/', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -219,7 +169,7 @@ router.post('/', authenticateToken, async (req: AuthenticatedRequest, res: Respo
       return res.status(400).json({ error: Object.values(result.fields)[0], code: 'VALIDATION', fields: result.fields });
     }
     const { pickupZone, destinationZone, seatCount, allowSharing } = result.input;
-    const soloFare = calculateFareForPassenger(pickupZone, destinationZone, seatCount, 1);
+    const soloFare = calculateBaseFare(pickupZone, destinationZone, seatCount);
 
     // Check + insert in one transaction. The partial unique index (see migrations.ts) is the
     // backstop if two requests from the same passenger race past the check.
@@ -501,9 +451,9 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
 
       // ── STEP 3: Recalculate pool fares for ALL passengers ───────────────
       // Now that this ride is MATCHED (vehicleId is set), the pool has grown.
-      // recalculatePoolFares() counts all non-terminal rides on the vehicle
-      // and applies/removes the pool discount accordingly.
-      await recalculatePoolFares(vehicle.id, sequelize, t);
+      // Every current passenger is re-priced from their own base fare (70% each for 2
+      // passengers, 55% for 3); rides that have already STARTED keep their locked fare.
+      await recalculatePoolFares(vehicle.id, t);
     });
 
     // Return the updated ride so the caller can see the new fare
@@ -530,7 +480,7 @@ router.post('/:id/accept', async (req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 // GET /ride-requests/:id/pool-info
 // Returns the pool summary for a matched ride: co-passengers count (no PII),
-// and whether a pool discount is being applied.
+// and how much of their own fare each passenger pays (the share rate).
 // ---------------------------------------------------------------------------
 router.get('/:id/pool-info', async (req: Request, res: Response) => {
   try {
@@ -545,7 +495,7 @@ router.get('/:id/pool-info', async (req: Request, res: Response) => {
 
     if (!ride.vehicleId) {
       // Not yet matched — no pool info
-      return res.json({ poolSize: 1, coPassengers: 0, poolDiscountApplied: false });
+      return res.json({ poolSize: 1, coPassengers: 0, shareRatePercent: 100, poolDiscountApplied: false });
     }
 
     const poolRides: any[] = await RideRequest.findAll({
@@ -560,7 +510,8 @@ router.get('/:id/pool-info', async (req: Request, res: Response) => {
     res.json({
       poolSize,
       coPassengers: poolSize - 1,
-      poolDiscountApplied: poolSize >= 2,
+      shareRatePercent: shareRatePercent(poolSize, ride.allowSharing),
+      poolDiscountApplied: ride.poolDiscount > 0,
     });
   } catch (error) {
     console.error('Pool info error:', error);

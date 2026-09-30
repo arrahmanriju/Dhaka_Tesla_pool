@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { Op } from 'sequelize';
 import { User, Vehicle, RideRequest, DriverProfile } from '../models';
 import { validateTransition, RideStatus } from '../models/RideRequest';
+import { isFareLocked, recalculatePoolFares } from '../utils/poolFares';
 
 const router = Router();
 
@@ -199,6 +200,10 @@ router.patch('/rides/:id/cancel', async (req: Request, res: Response) => {
           { occupiedSeats: sequelize.literal(`MAX(0, occupiedSeats - ${ride.seatCount})`) },
           { where: { id: ride.vehicleId }, transaction: t }
         );
+
+        // Someone left the pool: re-price everyone still in it (rides already STARTED keep
+        // their locked fare).
+        await recalculatePoolFares(ride.vehicleId, t);
       }
     });
 
@@ -235,15 +240,18 @@ router.get('/rides/active', async (req: Request, res: Response) => {
       destinationZone: r.destinationZone,
       seatCount: r.seatCount,
       status: r.status,
+      // Money is whole taka. estimatedFare is what this passenger pays (= what the driver earns from them).
       baseFare: r.baseFare,
       estimatedFare: r.estimatedFare,
-      estimatedFareBDT: (r.estimatedFare / 100).toFixed(2),
       poolDiscount: r.poolDiscount,
-      poolDiscountBDT: (r.poolDiscount / 100).toFixed(2),
+      fareLocked: isFareLocked(r.status),
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
     }));
 
+    // The driver's earnings for this ride: everything the passengers in the pool pay.
+    // 1 passenger → 100% of their base fare, 2 → 140%, 3 → 165% (see fareCalculator.ts).
+    const totalEarnings = activeRides.reduce((sum: number, r: any) => sum + r.estimatedFare, 0);
     const totalOccupied = activeRides.reduce((sum: number, r: any) => sum + r.seatCount, 0);
 
     // Get vehicle info for pool capacity display
@@ -257,7 +265,13 @@ router.get('/rides/active', async (req: Request, res: Response) => {
       availableSeats: vehicle.seatCapacity - vehicle.occupiedSeats,
     } : null;
 
-    res.json({ rides: summary, totalOccupiedSeats: totalOccupied, vehicle: vehicleInfo });
+    res.json({
+      rides: summary,
+      poolSize: activeRides.length,
+      totalEarnings,
+      totalOccupiedSeats: totalOccupied,
+      vehicle: vehicleInfo,
+    });
   } catch (error) {
     console.error('Get active rides error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -291,7 +305,6 @@ router.get('/rides/history', async (req: Request, res: Response) => {
         seatCount: r.seatCount,
         baseFare: r.baseFare,
         estimatedFare: r.estimatedFare,
-        estimatedFareBDT: (r.estimatedFare / 100).toFixed(2),
         poolDiscount: r.poolDiscount,
         status: r.status,
         vehicleId: r.vehicleId,
@@ -329,6 +342,7 @@ router.get('/rides/pool', async (req: Request, res: Response) => {
     });
 
     const totalSeatsUsed = poolRides.reduce((s: number, r: any) => s + r.seatCount, 0);
+    const totalEarnings = poolRides.reduce((s: number, r: any) => s + r.estimatedFare, 0);
 
     res.json({
       vehicle: {
@@ -340,6 +354,7 @@ router.get('/rides/pool', async (req: Request, res: Response) => {
         availableSeats: vehicle.seatCapacity - vehicle.occupiedSeats,
       },
       poolSize: poolRides.length,
+      totalEarnings,
       totalSeatsUsed,
       passengers: poolRides.map((r: any) => ({
         rideId: r.id,
@@ -348,8 +363,9 @@ router.get('/rides/pool', async (req: Request, res: Response) => {
         destinationZone: r.destinationZone,
         seatCount: r.seatCount,
         status: r.status,
-        estimatedFareBDT: (r.estimatedFare / 100).toFixed(2),
-        poolDiscountBDT: (r.poolDiscount / 100).toFixed(2),
+        estimatedFare: r.estimatedFare,
+        poolDiscount: r.poolDiscount,
+        fareLocked: isFareLocked(r.status),
       })),
     });
   } catch (error) {

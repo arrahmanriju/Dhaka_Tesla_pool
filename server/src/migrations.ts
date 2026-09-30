@@ -1,5 +1,6 @@
 import fs from 'fs';
 import { sequelize, storagePath } from './models';
+import { recalculatePoolFares } from './utils/poolFares';
 
 /**
  * One-off, idempotent upgrade of an existing SQLite `Users` table:
@@ -101,4 +102,59 @@ export async function ensureOneActiveRideIndex(): Promise<void> {
       (err as Error).message,
     );
   }
+}
+
+/** `PRAGMA user_version` value meaning "RideRequests fares are stored as whole taka". */
+export const FARES_IN_TAKA_VERSION = 1;
+
+/** Records that fares are in whole taka, so migrateFaresToTaka() never converts them again. */
+export async function markFaresInTaka(): Promise<void> {
+  await sequelize.query(`PRAGMA user_version = ${FARES_IN_TAKA_VERSION}`);
+}
+
+/**
+ * One-off, idempotent: fares used to be stored as integer paisa (৳140 = 14000). They are now whole
+ * taka rounded to the nearest ৳5, so existing rows are divided by 100 and rounded.
+ * Rides that are still open (pooled, not started) are then re-priced with the share-rate model;
+ * rides that have already STARTED keep their converted, locked fare.
+ *
+ * The database's `user_version` records that the conversion happened. A brand-new database (no
+ * RideRequests table yet) is stamped immediately, because everything written to it is already
+ * taka; the seed script does the same. A copy of the database file is saved first.
+ */
+export async function migrateFaresToTaka(): Promise<void> {
+  const [cols] = (await sequelize.query('PRAGMA table_info(`RideRequests`)')) as [{ name: string }[], unknown];
+  if (cols.length === 0) {
+    await markFaresInTaka(); // fresh database — sync() will create the table with taka semantics
+    return;
+  }
+
+  const [versionRows] = (await sequelize.query('PRAGMA user_version')) as [{ user_version: number }[], unknown];
+  if ((versionRows[0]?.user_version ?? 0) >= FARES_IN_TAKA_VERSION) return; // already converted
+
+  if (storagePath !== ':memory:' && fs.existsSync(storagePath)) {
+    const backup = `${storagePath}.pre-taka-migration.bak`;
+    if (!fs.existsSync(backup)) fs.copyFileSync(storagePath, backup);
+    console.log(`[migrate] RideRequests: backed up database to ${backup}`);
+  }
+
+  // Conversion and the version stamp commit together, on one connection (plain BEGIN/COMMIT).
+  const toTaka = (column: string) => `\`${column}\` = CAST(ROUND(\`${column}\` / 500.0) AS INTEGER) * 5`; // paisa/100, nearest 5
+  await sequelize.query('BEGIN');
+  try {
+    await sequelize.query(
+      `UPDATE \`RideRequests\` SET ${toTaka('baseFare')}, ${toTaka('estimatedFare')}, ${toTaka('poolDiscount')}`,
+    );
+    await markFaresInTaka();
+    await sequelize.query('COMMIT');
+  } catch (err) {
+    await sequelize.query('ROLLBACK').catch(() => undefined);
+    throw err;
+  }
+
+  const [pools] = (await sequelize.query(
+    "SELECT DISTINCT `vehicleId` FROM `RideRequests` WHERE `vehicleId` IS NOT NULL AND `status` NOT IN ('CANCELLED', 'COMPLETED')",
+  )) as [{ vehicleId: string }[], unknown];
+  for (const { vehicleId } of pools) await recalculatePoolFares(vehicleId);
+  console.log(`[migrate] RideRequests: fares converted to whole taka (${pools.length} open pool(s) re-priced)`);
 }

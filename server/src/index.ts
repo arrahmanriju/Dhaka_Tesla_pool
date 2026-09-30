@@ -9,7 +9,7 @@ import passengerRoutes from './routes/passenger';
 import { sequelize, storagePath } from './models';
 import { UPLOADS_DIR } from './utils/onboarding';
 import onboardingRoutes from './routes/onboarding';
-import { migrateUsersTable, migrateRideRequestsTable, ensureOneActiveRideIndex } from './migrations';
+import { migrateUsersTable, migrateRideRequestsTable, migrateFaresToTaka, ensureOneActiveRideIndex } from './migrations';
 
 dotenv.config();
 
@@ -59,6 +59,7 @@ if (require.main === module) {
   // Sync database and start server
   migrateUsersTable()
     .then(() => migrateRideRequestsTable())
+    .then(() => migrateFaresToTaka())
     .then(() => sequelize.sync())
     .then(() => ensureOneActiveRideIndex())
     .then(() => {

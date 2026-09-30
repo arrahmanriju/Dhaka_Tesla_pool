@@ -2,7 +2,8 @@ import { Router, Request, Response } from 'express';
 import { Op } from 'sequelize';
 import { User, RideRequest, Vehicle } from '../models';
 import { validateTransition, RideStatus } from '../models/RideRequest';
-import { recalculatePoolFares } from './rideRequest';
+import { isFareLocked, recalculatePoolFares } from '../utils/poolFares';
+import { shareRatePercent } from '../utils/fareCalculator';
 
 const router = Router();
 
@@ -80,7 +81,7 @@ async function enrichRide(ride: any) {
   let vehicleInfo = null;
   let driverName: string | null = null;
   let coPassengers = 0;
-  let poolDiscountApplied = false;
+  let poolSize = 1;
 
   if (ride.vehicleId) {
     const vehicle: any = await Vehicle.findByPk(ride.vehicleId, {
@@ -95,8 +96,8 @@ async function enrichRide(ride: any) {
         status: { [Op.notIn]: ['CANCELLED', 'COMPLETED'] },
       },
     });
-    coPassengers = Math.max(0, poolCount - 1);
-    poolDiscountApplied = poolCount >= 2;
+    poolSize = Math.max(1, poolCount);
+    coPassengers = poolSize - 1;
   }
 
   if (ride.driverId) {
@@ -113,16 +114,18 @@ async function enrichRide(ride: any) {
     destinationZone: ride.destinationZone,
     seatCount: ride.seatCount,
     allowSharing: ride.allowSharing,
-    baseFare: ride.baseFare,
-    estimatedFare: ride.estimatedFare,
-    estimatedFareBDT: (ride.estimatedFare / 100).toFixed(2),
-    poolDiscount: ride.poolDiscount,
-    poolDiscountBDT: (ride.poolDiscount / 100).toFixed(2),
+    // Only THIS passenger's own fare is ever returned (never a co-passenger's). Whole taka.
+    baseFare: ride.baseFare, // the fare riding alone
+    estimatedFare: ride.estimatedFare, // what they pay right now
+    poolDiscount: ride.poolDiscount, // what they save by sharing
+    fareLocked: isFareLocked(ride.status), // true once the trip has started
     status: ride.status,
     vehicle: vehicleInfo,
     driverName,
     coPassengers,
-    poolDiscountApplied,
+    poolSize,
+    shareRatePercent: shareRatePercent(poolSize, ride.allowSharing),
+    poolDiscountApplied: ride.poolDiscount > 0,
     isSharedRide: coPassengers > 0,
     canCancel: PASSENGER_CANCELLABLE.includes(ride.status as RideStatus),
     createdAt: ride.createdAt,
@@ -185,9 +188,8 @@ router.get('/rides/history', async (req: Request, res: Response) => {
         seatCount: r.seatCount,
         baseFare: r.baseFare,
         estimatedFare: r.estimatedFare,
-        estimatedFareBDT: (r.estimatedFare / 100).toFixed(2),
         poolDiscount: r.poolDiscount,
-        poolDiscountBDT: (r.poolDiscount / 100).toFixed(2),
+        fareLocked: isFareLocked(r.status),
         status: r.status,
         vehicleId: r.vehicleId,
         createdAt: r.createdAt,
@@ -278,8 +280,9 @@ router.patch('/rides/:id/cancel', async (req: Request, res: Response) => {
 
         // 3. Recalculate fares for the remaining pool passengers.
         //    recalculatePoolFares() will NOT include this now-CANCELLED ride
-        //    because it filters by non-terminal statuses.
-        await recalculatePoolFares(ride.vehicleId, sequelize, t);
+        //    because it filters by non-terminal statuses. Fares that are already
+        //    locked (STARTED) are left alone.
+        await recalculatePoolFares(ride.vehicleId, t);
       }
     });
 

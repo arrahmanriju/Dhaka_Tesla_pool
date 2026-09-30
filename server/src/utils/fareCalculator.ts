@@ -1,4 +1,4 @@
-import { DhakaZone, DHAKA_ZONES } from '../models/RideRequest';
+import { DhakaZone, DHAKA_ZONES, MAX_SEATS_PER_RIDE } from '../models/RideRequest';
 
 // ---------------------------------------------------------------------------
 // Zone distance matrix (km) — Dhaka areas, symmetric
@@ -17,23 +17,40 @@ const DISTANCE_MATRIX: Record<string, Record<string, number>> = {
 };
 
 // ---------------------------------------------------------------------------
-// Fare constants
+// Fare constants — all money in this app is WHOLE TAKA (integers, never paisa)
 // ---------------------------------------------------------------------------
-/** Fixed base fare per ride segment (BDT) */
+/** Fixed part of a route's base fare (BDT) */
 export const BASE_FARE_BDT = 100;
 
 /** Variable charge per km per seat (BDT) */
 export const RATE_PER_KM_PER_SEAT_BDT = 20;
 
+/** Every fare is rounded to the nearest ৳5. */
+export const FARE_ROUNDING_BDT = 5;
+
+// ---------------------------------------------------------------------------
+// SHARE RATE — how much of their OWN base fare each passenger pays, by pool size.
+//
+//   1 passenger  → 100%   driver earns 100% of one base fare
+//   2 passengers →  70%   each; driver earns 140%
+//   3 passengers →  55%   each; driver earns 165%
+//
+// Kept as whole percentages so every calculation is exact integer arithmetic
+// (0.7 × 180 in floating point is 125.99999999999999).
+// A pool larger than 3 keeps the 3-passenger rate (the fleet's largest Tesla seats 3,
+// but older vehicles registered before onboarding may be bigger).
+// ---------------------------------------------------------------------------
+export const SHARE_RATE_PERCENT: Readonly<Record<number, number>> = { 1: 100, 2: 70, 3: 55 };
+export const MAX_RATE_TIER = 3;
+
 /**
- * POOL DISCOUNT: applied per-passenger (BDT) when 2 or more passengers
- * share the same vehicle on the same pool trip.
- *
- * The discount applies to ALL passengers already in the pool and to the
- * newcomer simultaneously. It is removed if pool size drops back to 1
- * (e.g. if one passenger cancels).
+ * Percentage of their own base fare a passenger pays.
+ * A private ride (allowSharing = false) always pays 100%, whatever the pool looks like.
  */
-export const POOL_DISCOUNT_BDT = 30;
+export function shareRatePercent(poolSize: number, allowSharing = true): number {
+  if (!allowSharing || poolSize <= 1) return SHARE_RATE_PERCENT[1]!;
+  return SHARE_RATE_PERCENT[Math.min(Math.floor(poolSize), MAX_RATE_TIER)]!;
+}
 
 // ---------------------------------------------------------------------------
 // Distance helper
@@ -45,80 +62,111 @@ function getDistance(pickup: DhakaZone, dropoff: DhakaZone): number {
     ?? 8; // fallback default
 }
 
+/** Rounds a taka amount to the nearest ৳5 (halves round up). */
+export function roundToNearest5(taka: number): number {
+  return Math.floor((taka + FARE_ROUNDING_BDT / 2) / FARE_ROUNDING_BDT) * FARE_ROUNDING_BDT;
+}
+
 // ---------------------------------------------------------------------------
-// calculateFareForPassenger
+// calculateBaseFare
 //
-// Returns the fare (integer paisa) for ONE passenger's segment.
+// A passenger's OWN base fare: what their pickup → destination costs when they ride alone.
 //
-// Formula:
-//   passengerFare = baseFare + distanceCharge - poolDiscount
+//   baseFare = 100 + distanceKm × 20 × seatCount        (whole taka)
 //
-// Where:
-//   baseFare       = 100 BDT  (fixed per ride segment)
-//   distanceCharge = distanceKm × 20 BDT × seatCount
-//   poolDiscount   = 30 BDT  if poolSize >= 2, else 0
-//
-// Worked example (Nusrat: Gulshan→Banani, 1 seat, alone):
-//   baseFare       = 100 BDT
-//   distanceCharge = 2km × 20 × 1 = 40 BDT
-//   poolDiscount   = 0  (alone)
-//   fare           = 140 BDT = 14 000 paisa
-//
-// After Rafiq joins the SAME pool (Gulshan→Banani, 1 seat):
-//   Nusrat's fare recalculated with poolDiscount=30:
-//   fare = 100 + 40 - 30 = 110 BDT = 11 000 paisa  ← recalculated downward
-//   Rafiq's fare:
-//   fare = 100 + 40 - 30 = 110 BDT = 11 000 paisa
+// Example (Mohakhali → Badda, 4 km, 1 seat):  100 + 4 × 20 × 1 = ৳180
+// Set once when the ride is requested and never changes.
 // ---------------------------------------------------------------------------
+export function calculateBaseFare(pickup: string, dropoff: string, seatCount: number): number {
+  if (!DHAKA_ZONES.includes(pickup as any) || !DHAKA_ZONES.includes(dropoff as any)) {
+    throw new Error('Invalid zone');
+  }
+  const distanceKm = getDistance(pickup as DhakaZone, dropoff as DhakaZone);
+  return roundToNearest5(BASE_FARE_BDT + distanceKm * RATE_PER_KM_PER_SEAT_BDT * seatCount);
+}
+
+// ---------------------------------------------------------------------------
+// applyShareRate
+//
+//   passengerFare = baseFare × shareRate, rounded to the nearest ৳5
+//
+// Works from the passenger's own stored base fare, so pooled passengers with different
+// destinations each get the same percentage off their own price.
+//
+//   base ৳180: alone ৳180 · with 2 → ৳125 (126) · with 3 → ৳100 (99)
+//   base ৳100: alone ৳100 · with 2 → ৳70        · with 3 → ৳55
+// ---------------------------------------------------------------------------
+export function applyShareRate(baseFare: number, poolSize: number, allowSharing = true): number {
+  const percent = shareRatePercent(poolSize, allowSharing);
+  // round(baseFare × percent / 100 to the nearest 5) in exact integer arithmetic (halves up):
+  //   floor((baseFare × percent / 100 + 2.5) / 5) × 5  ==  floor((baseFare × percent + 250) / 500) × 5
+  return Math.floor((baseFare * percent + 250) / 500) * FARE_ROUNDING_BDT;
+}
+
+/**
+ * The fare (whole taka) for ONE passenger's segment.
+ * `poolSize` is the number of passengers in the pool, including this one.
+ */
 export function calculateFareForPassenger(
   pickup: string,
   dropoff: string,
   seatCount: number,
-  poolSize: number   // total number of DISTINCT passengers in the pool (including this one)
+  poolSize: number,
+  allowSharing = true
 ): number {
-  if (!DHAKA_ZONES.includes(pickup as any) || !DHAKA_ZONES.includes(dropoff as any)) {
-    throw new Error('Invalid zone');
-  }
-
-  const distanceKm = getDistance(pickup as DhakaZone, dropoff as DhakaZone);
-  const distanceCharge = distanceKm * RATE_PER_KM_PER_SEAT_BDT * seatCount;
-  const poolDiscount = poolSize >= 2 ? POOL_DISCOUNT_BDT : 0;
-
-  const fareBdt = Math.max(BASE_FARE_BDT, BASE_FARE_BDT + distanceCharge - poolDiscount);
-  return fareBdt * 100; // integer paisa
+  return applyShareRate(calculateBaseFare(pickup, dropoff, seatCount), poolSize, allowSharing);
 }
 
 /**
- * Legacy shim so existing callers don't break.
- * Assumes pool size = 1 (no co-passengers yet, discount not applied at creation time;
- * it will be applied when a second passenger joins via recalculatePoolFares()).
+ * Legacy shim so existing callers don't break: the solo fare (no co-passengers yet).
+ * The fare drops later, when others join, via recalculatePoolFares().
  */
-export function calculateEstimatedFare(
-  pickup: string,
-  dropoff: string,
-  seatCount: number
-): number {
-  return calculateFareForPassenger(pickup, dropoff, seatCount, 1);
+export function calculateEstimatedFare(pickup: string, dropoff: string, seatCount: number): number {
+  return calculateBaseFare(pickup, dropoff, seatCount);
+}
+
+// ---------------------------------------------------------------------------
+// Fare estimate shown on the Request Ride page
+// ---------------------------------------------------------------------------
+export interface FareTier {
+  /** Passengers in the pool, including this one */
+  passengers: number;
+  /** Percentage of the base fare each of them pays */
+  ratePercent: number;
+  /** What this passenger pays (whole taka) */
+  fare: number;
 }
 
 /**
- * Fare shown to the passenger before they confirm.
+ * What the passenger pays alone, and what they would pay as others join.
  *
- *   fare     = what they pay if nobody joins (the full solo fare). A private ride always costs this.
- *   poolFare = what they pay once a second passenger joins a shared ride (POOL_DISCOUNT_BDT lower);
- *              null for a private ride, which is never pooled and never discounted.
+ *   baseFare = their own full fare; a private ride always costs exactly this
+ *   fare     = same as baseFare (nobody has joined yet)
+ *   tiers    = the price with 2, 3 … passengers; empty for a private ride
+ *              (never pooled) or a booking that fills the whole car
+ *   poolFare = the first tier (price once one other person joins); null when there are no tiers
  *
- * Both are integer paisa and come from calculateFareForPassenger, so the estimate can never
- * drift from the fare stored on the ride.
+ * Built from the same functions that price the stored ride, so the estimate can never
+ * drift from what is charged.
  */
 export function estimateFare(
   pickup: string,
   dropoff: string,
   seatCount: number,
   allowSharing: boolean
-): { fare: number; poolFare: number | null } {
-  return {
-    fare: calculateFareForPassenger(pickup, dropoff, seatCount, 1),
-    poolFare: allowSharing ? calculateFareForPassenger(pickup, dropoff, seatCount, 2) : null,
-  };
+): { baseFare: number; fare: number; poolFare: number | null; tiers: FareTier[] } {
+  const baseFare = calculateBaseFare(pickup, dropoff, seatCount);
+  // Other passengers can only join while seats remain in the largest (3-seat) car.
+  const maxPassengers = Math.min(MAX_RATE_TIER, MAX_SEATS_PER_RIDE - seatCount + 1);
+  const tiers: FareTier[] = [];
+  if (allowSharing) {
+    for (let passengers = 2; passengers <= maxPassengers; passengers++) {
+      tiers.push({
+        passengers,
+        ratePercent: shareRatePercent(passengers),
+        fare: applyShareRate(baseFare, passengers),
+      });
+    }
+  }
+  return { baseFare, fare: baseFare, poolFare: tiers[0]?.fare ?? null, tiers };
 }

@@ -5,9 +5,10 @@
  *   Nusrat: Banani → Mohakhali,  1 seat, sharing on
  *   Rafiq:  Banani → Gulshan 1,  1 seat, sharing on
  *
- * Fare arithmetic (100 BDT base + km × 20 BDT × seats, minus 30 BDT when pooled):
- *   Banani → Mohakhali  2 km → solo 140 BDT, pooled 110 BDT
- *   Banani → Gulshan 1  3 km → solo 160 BDT, pooled 130 BDT
+ * Fare arithmetic (base = 100 + km × 20 × seats; pooled = base × 70% with 2, × 55% with 3,
+ * rounded to the nearest ৳5):
+ *   Banani → Mohakhali  2 km → base ৳140 · with 2: ৳100 · with 3: ৳75
+ *   Banani → Gulshan 1  3 km → base ৳160 · with 2: ৳110 · with 3: ৳90
  */
 import request from 'supertest';
 import { app } from '../index';
@@ -59,7 +60,7 @@ describe('Request ride', () => {
         seatCount: 1,
         allowSharing: true,
         status: 'REQUESTED',
-        estimatedFare: 14000,
+        estimatedFare: 140,
         poolDiscount: 0,
       });
     });
@@ -67,7 +68,7 @@ describe('Request ride', () => {
     it('Rafiq (Banani → Gulshan 1, 1 seat, sharing on) gets a REQUESTED ride at the solo fare', async () => {
       const res = await requestRide(rafiq, RAFIQ_RIDE);
       expect(res.status).toBe(201);
-      expect(res.body.rideRequest).toMatchObject({ status: 'REQUESTED', estimatedFare: 16000, allowSharing: true });
+      expect(res.body.rideRequest).toMatchObject({ status: 'REQUESTED', estimatedFare: 160, allowSharing: true });
     });
 
     it('both can be requested at the same time (one active ride each)', async () => {
@@ -85,23 +86,32 @@ describe('Request ride', () => {
       expect(est.status).toBe(200);
       const created = await requestRide(nusrat, NUSRAT_RIDE);
       expect(est.body.fare).toBe(created.body.rideRequest.estimatedFare);
-      expect(est.body).toMatchObject({ fare: 14000, fareBDT: '140.00', poolFare: 11000, poolFareBDT: '110.00' });
+      expect(est.body).toMatchObject({
+        baseFare: 140,
+        fare: 140,
+        poolFare: 100,
+        tiers: [
+          { passengers: 2, ratePercent: 70, fare: 100 },
+          { passengers: 3, ratePercent: 55, fare: 75 },
+        ],
+      });
     });
 
-    it('a private ride has no pool fare', async () => {
+    it('a private ride has no pool fare and no tiers (it always costs the full fare)', async () => {
       const est = await estimate(rafiq, { ...RAFIQ_RIDE, allowSharing: false });
-      expect(est.body).toMatchObject({ fare: 16000, poolFare: null, poolFareBDT: null });
+      expect(est.body).toMatchObject({ fare: 160, poolFare: null, tiers: [] });
     });
 
     it('changes with zones and seats', async () => {
-      // 100 + 2 km × 20 × 3 seats = 220 BDT
+      // 100 + 2 km × 20 × 3 seats = ৳220. Three seats fill the whole car, so nobody can join: no tiers.
       const est = await estimate(nusrat, { ...NUSRAT_RIDE, seatCount: 3 });
-      expect(est.body.fare).toBe(22000);
+      expect(est.body.fare).toBe(220);
+      expect(est.body).toMatchObject({ poolFare: null, tiers: [] });
     });
 
     it('sharing defaults to on when omitted', async () => {
       const est = await estimate(nusrat, { pickupZone: 'Banani', destinationZone: 'Mohakhali', seatCount: 1 });
-      expect(est.body.poolFare).toBe(11000);
+      expect(est.body.poolFare).toBe(100);
     });
 
     it('rejects the same invalid input as the create endpoint', async () => {
@@ -251,12 +261,12 @@ describe('Request ride', () => {
       request(app).post(`/ride-requests/${rideId}/accept`).send({ driverId: driver.id });
     const pending = () => request(app).get(`/ride-requests/pending?driverId=${driver.id}`);
 
-    it('shared rides on the same route still pool and get the discount', async () => {
+    it('shared rides on the same route still pool and split the fare', async () => {
       const a = await requestRide(nusrat, NUSRAT_RIDE);
       const b = await requestRide(rafiq, { ...NUSRAT_RIDE });
       expect((await accept(a.body.rideRequest.id)).status).toBe(200);
       expect((await accept(b.body.rideRequest.id)).status).toBe(200);
-      expect((await RideRequest.findByPk(a.body.rideRequest.id))!.estimatedFare).toBe(11000);
+      expect((await RideRequest.findByPk(a.body.rideRequest.id))!.estimatedFare).toBe(100); // 70% of ৳140
     });
 
     it('a private request cannot join a vehicle that already has a passenger', async () => {
@@ -296,7 +306,7 @@ describe('Request ride', () => {
       const res = await requestRide(nusrat, { ...NUSRAT_RIDE, allowSharing: false });
       await accept(res.body.rideRequest.id);
       const ride = await RideRequest.findByPk(res.body.rideRequest.id);
-      expect(ride!.estimatedFare).toBe(14000);
+      expect(ride!.estimatedFare).toBe(140);
       expect(ride!.poolDiscount).toBe(0);
     });
   });

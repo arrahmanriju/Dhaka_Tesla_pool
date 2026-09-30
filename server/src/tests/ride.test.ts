@@ -74,17 +74,18 @@ describe('Ride Request API and Logic', () => {
 
   describe('Fares', () => {
     it('stores the full solo fare at creation; the pool discount only applies once someone joins', async () => {
-      // Formula: baseFare(100) + distanceKm * 20 * seats, minus 30 once 2+ passengers share.
+      // Base fare: 100 + distanceKm * 20 * seats (whole taka). Once 2+ passengers share, each pays
+      // 70% (2) or 55% (3) of their own base fare, rounded to the nearest ৳5.
       // Gulshan -> Banani is 2 km.
-      // Solo, 1 seat: 100 + 2 * 20 * 1 = 140 BDT.
+      // Solo, 1 seat: 100 + 2 * 20 * 1 = ৳140.
       const p1 = (await User.create({ name: 'Nusrat', email: 'nusrat@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
       const res1 = await request(app).post('/ride-requests').set(asUser(p1.id)).send({ pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 1 });
-      expect(res1.body.rideRequest.estimatedFare).toBe(14000); // 140 BDT in paisa
+      expect(res1.body.rideRequest.estimatedFare).toBe(140);
 
-      // Solo, 3 seats (the maximum): 100 + 2 * 20 * 3 = 220 BDT.
+      // Solo, 3 seats (the maximum): 100 + 2 * 20 * 3 = ৳220.
       const p2 = (await User.create({ name: 'Rafiq', email: 'rafiq@test.com', password: 'pwd', role: 'PASSENGER' })).toJSON() as any;
       const res2 = await request(app).post('/ride-requests').set(asUser(p2.id)).send({ pickupZone: 'Gulshan', destinationZone: 'Banani', seatCount: 3 });
-      expect(res2.body.rideRequest.estimatedFare).toBe(22000); // 220 BDT
+      expect(res2.body.rideRequest.estimatedFare).toBe(220);
     });
   });
 
