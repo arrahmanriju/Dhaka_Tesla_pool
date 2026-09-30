@@ -41,9 +41,10 @@ async function seed() {
       modelName: 'Bullet',
       seatCapacity: 3,
       licensePlate: jashimProfile.driverCode, // the Tesla ID doubles as the vehicle identifier
-      vehicleCode: 'BULLET', // the public code on Bullet's QR sticker (hand-picked so the demo is easy to type)
+      // vehicleCode is left out on purpose: it defaults to Jashim's Tesla ID, so Bullet's QR code is DTP-0001,
+      // the same ID the app shows as "Tesla ID"
     });
-    console.log(`Onboarded driver Jashim: vehicle Bullet (3 seats), Banani, ${jashimProfile.driverCode}`);
+    console.log(`Onboarded driver Jashim: vehicle Bullet (3 seats), Banani, Tesla ID and QR code ${jashimProfile.driverCode}`);
 
     // 3. Create Passengers
     const passengers = ['Nusrat', 'Rafiq', 'Shirin'];

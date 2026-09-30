@@ -233,6 +233,23 @@ export async function migrateVehicleCodes(): Promise<void> {
     }
   }
   await sequelize.query('CREATE UNIQUE INDEX IF NOT EXISTS `vehicles_vehicle_code_unique` ON `Vehicles` (`vehicleCode`)');
+
+  // ONE PUBLIC ID: an active vehicle whose driver has a Tesla ID (DriverProfiles.id -> "DTP-0001") uses that
+  // Tesla ID as its vehicle code, replacing the random code an earlier version of this migration gave it.
+  // Idempotent, and it never steals a code another vehicle already holds. (DriverProfile.driverCode is
+  // computed from the id, not stored, so it is rebuilt here the same way: DTP- plus the id padded to 4.)
+  const [profiles] = (await sequelize.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'DriverProfiles'")) as [unknown[], unknown];
+  if (profiles.length > 0) {
+    const teslaId = "(SELECT 'DTP-' || printf('%04d', p.`id`) FROM `DriverProfiles` p WHERE p.`userId` = `Vehicles`.`driverId`)";
+    await sequelize.query(
+      `UPDATE \`Vehicles\` SET \`vehicleCode\` = ${teslaId} ` +
+        `WHERE \`isActive\` = 1 AND ${teslaId} IS NOT NULL AND \`vehicleCode\` != ${teslaId} ` +
+        // only ONE vehicle per driver takes the Tesla ID (the oldest active one): a code is unique
+        `AND \`id\` = (SELECT v3.\`id\` FROM \`Vehicles\` v3 WHERE v3.\`driverId\` = \`Vehicles\`.\`driverId\` AND v3.\`isActive\` = 1 ORDER BY v3.\`createdAt\` ASC, v3.\`id\` ASC LIMIT 1) ` +
+        `AND NOT EXISTS (SELECT 1 FROM \`Vehicles\` v2 WHERE v2.\`vehicleCode\` = ${teslaId} AND v2.\`id\` != \`Vehicles\`.\`id\`)`
+    );
+
+  }
 }
 
 /**

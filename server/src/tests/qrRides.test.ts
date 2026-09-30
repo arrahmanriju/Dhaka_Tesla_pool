@@ -28,6 +28,7 @@ import {
   QRRideSession,
   QRRideParticipant,
   DriverBonus,
+  DriverProfile,
 } from '../models';
 import { ensureOneActiveRideIndex, ensureOneOpenQRSessionIndex, migrateVehicleCodes } from '../migrations';
 import { closeStaleSessions, QR_SESSION_TIMEOUT_MINUTES, DRIVER_BONUS_PER_EXTRA_PASSENGER } from '../services/qrRides';
@@ -40,12 +41,15 @@ let rafiq: any;
 let shirin: any;
 let tania: any;
 let bullet: any;
+let jashimProfile: any;
+let nidCounter = 1000000000;
 
 const UTTARA_TO_DHANMONDI = { pickupZone: 'Uttara', destinationZone: 'Dhanmondi' };
 const UTTARA_TO_MIRPUR = { pickupZone: 'Uttara', destinationZone: 'Mirpur' };
 
+// Bullet's public code is its driver's Tesla ID (e.g. "DTP-0007"): the same value the app shows as "Tesla ID"
 const join = (who: any, body: Record<string, unknown> = {}) =>
-  request(app).post('/qr/join').set(asUser(who.id)).send({ vehicleCode: 'BULLET', ...body });
+  request(app).post('/qr/join').set(asUser(who.id)).send({ vehicleCode: bullet.vehicleCode, ...body });
 const arrived = (who: any, sessionId: string) => request(app).post(`/qr/sessions/${sessionId}/arrived`).set(asUser(who.id)).send({});
 const view = (who: any, sessionId: string) => request(app).get(`/qr/sessions/${sessionId}`).set(asUser(who.id));
 const occupied = async () => (await Vehicle.findByPk(bullet.id))!.occupiedSeats;
@@ -69,7 +73,9 @@ describe('QR street rides', () => {
     rafiq = await mk('Rafiq', 'PASSENGER', 2, 500);
     shirin = await mk('Shirin', 'PASSENGER', 3);
     tania = await mk('Tania', 'PASSENGER', 4);
-    bullet = (await Vehicle.create({ driverId: jashim.id, modelName: 'Bullet', seatCapacity: 3, licensePlate: 'DTP-0001', vehicleCode: 'BULLET' })).toJSON();
+    // Onboarded the way the real flow does it: profile first (its id becomes the Tesla ID), then the vehicle
+    jashimProfile = await DriverProfile.create({ userId: jashim.id, homeZone: 'Banani', nid: String(++nidCounter) });
+    bullet = (await Vehicle.create({ driverId: jashim.id, modelName: 'Bullet', seatCapacity: 3, licensePlate: jashimProfile.driverCode })).toJSON();
   });
   afterEach(async () => {
     await DriverBonus.destroy({ where: {} });
@@ -80,6 +86,7 @@ describe('QR street rides', () => {
     await RideEvent.destroy({ where: {} });
     await RideRequest.destroy({ where: {} });
     await Vehicle.destroy({ where: {} });
+    await DriverProfile.destroy({ where: {} });
     await User.destroy({ where: {} });
   });
 
@@ -98,13 +105,15 @@ describe('QR street rides', () => {
 
     it('is forgiving about case, spaces and hyphens, and rejects nonsense', () => {
       expect(normalizeVehicleCode('bullet')).toBe('BULLET');
-      expect(normalizeVehicleCode(' bul-let ')).toBe('BULLET');
       expect(normalizeVehicleCode('4kq 7m2')).toBe('4KQ7M2');
-      for (const bad of ['', 'ab', 'x'.repeat(30), '???', null, 42]) expect(normalizeVehicleCode(bad)).toBeNull();
+      // a hyphen is part of a Tesla ID and is kept
+      expect(normalizeVehicleCode(' dtp-0001 ')).toBe('DTP-0001');
+      expect(normalizeVehicleCode('DTP_0001')).toBe('DTP0001');
+      for (const bad of ['', 'ab', 'x'.repeat(30), '???', '-DTP', 'DTP-', 'DTP--0001', null, 42]) expect(normalizeVehicleCode(bad)).toBeNull();
     });
 
     it('cannot be duplicated', async () => {
-      await expect(Vehicle.create({ driverId: jashim.id, modelName: 'Clone', seatCapacity: 3, licensePlate: 'CLONE-1', vehicleCode: 'BULLET', isActive: false })).rejects.toThrow();
+      await expect(Vehicle.create({ driverId: jashim.id, modelName: 'Clone', seatCapacity: 3, licensePlate: 'CLONE-1', vehicleCode: bullet.vehicleCode, isActive: false })).rejects.toThrow();
     });
 
     it('is added to an existing database once, and every existing vehicle is backfilled', async () => {
@@ -115,23 +124,115 @@ describe('QR street rides', () => {
         'CREATE TABLE `Vehicles` (`id` UUID PRIMARY KEY, `driverId` UUID NOT NULL, `modelName` VARCHAR(255) NOT NULL, `seatCapacity` INTEGER NOT NULL, ' +
           '`licensePlate` VARCHAR(255) NOT NULL UNIQUE, `isActive` TINYINT(1) NOT NULL DEFAULT 1, `occupiedSeats` INTEGER NOT NULL DEFAULT 0, `createdAt` DATETIME NOT NULL, `updatedAt` DATETIME NOT NULL)'
       );
-      for (const [i, plate] of ['OLD-1', 'OLD-2', 'OLD-3'].entries()) {
+      // Jashim (who has a Tesla ID) has three legacy vehicles; Kamal, with no profile, has one
+      const kamal = await User.create({ name: 'Kamal', phone: '01717777777', email: 'kamal3-qr@test.com', password: 'x', role: 'DRIVER' });
+      const legacy: [string, string, string][] = [
+        ['00000000-0000-4000-8000-000000000001', jashim.id, 'OLD-1'],
+        ['00000000-0000-4000-8000-000000000002', jashim.id, 'OLD-2'],
+        ['00000000-0000-4000-8000-000000000003', jashim.id, 'OLD-3'],
+        ['00000000-0000-4000-8000-000000000004', kamal.id, 'OLD-4'],
+      ];
+      for (const [i, [id, driverId, plate]] of legacy.entries()) {
         await sequelize.query(
           'INSERT INTO `Vehicles` (`id`,`driverId`,`modelName`,`seatCapacity`,`licensePlate`,`createdAt`,`updatedAt`) VALUES (?,?,?,?,?,?,?)',
-          { replacements: [`00000000-0000-4000-8000-00000000000${i + 1}`, jashim.id, 'Old', 3, plate, new Date().toISOString(), new Date().toISOString()] }
+          { replacements: [id, driverId, 'Old', 3, plate, new Date(2024, 0, 1 + i).toISOString(), new Date().toISOString()] }
         );
       }
       await migrateVehicleCodes();
       await migrateVehicleCodes(); // idempotent
-      const rows = (await sequelize.query('SELECT vehicleCode FROM `Vehicles`'))[0] as { vehicleCode: string }[];
-      expect(rows).toHaveLength(3);
-      expect(new Set(rows.map((r) => r.vehicleCode)).size).toBe(3);
-      for (const r of rows) expect(r.vehicleCode).toMatch(/^[A-Z0-9]{6}$/);
+      const rows = (await sequelize.query('SELECT id, vehicleCode FROM `Vehicles` ORDER BY id'))[0] as { id: string; vehicleCode: string }[];
+      expect(rows).toHaveLength(4);
+      expect(new Set(rows.map((r) => r.vehicleCode)).size).toBe(4); // all unique
+      // the driver's OLDEST active vehicle carries the Tesla ID; the rest, and Kamal's, get random codes
+      expect(rows[0]!.vehicleCode).toBe(jashimProfile.driverCode);
+      for (const r of rows.slice(1)) expect(r.vehicleCode).toMatch(/^[A-Z0-9]{6}$/);
       // put the schema back for the rest of the suite
       await sequelize.query('PRAGMA foreign_keys = ON');
       await sequelize.sync({ force: true });
       await ensureOneActiveRideIndex();
       await ensureOneOpenQRSessionIndex();
+    });
+  });
+
+  // ─────────────────────────── the code shown is the code accepted ───────────────────────────
+  describe('one public ID: the Tesla ID shown in the app is the code the lookup accepts', () => {
+    it('an onboarded vehicle’s code IS its driver’s Tesla ID, and equals the plate copied from it', async () => {
+      expect(bullet.vehicleCode).toBe(jashimProfile.driverCode); // e.g. "DTP-0007"
+      expect(bullet.vehicleCode).toMatch(/^DTP-\d{4,}$/);
+      expect(bullet.licensePlate).toBe(bullet.vehicleCode);
+    });
+
+    it('the "Tesla ID" the app displays for the vehicle is exactly what the street-ride lookup accepts', async () => {
+      // What a passenger sees on an app ride card (RideStatusCard: vehicle.teslaId, i.e. the driver's Tesla ID)...
+      const created = await request(app).post('/ride-requests').set(asUser(shirin.id)).send({ pickupZone: 'Mohakhali', destinationZone: 'Badda', seatCount: 1 });
+      await request(app).post(`/ride-requests/${created.body.rideRequest.id}/accept`).send({ driverId: jashim.id });
+      const card = (await request(app).get(`/passenger/rides/${created.body.rideRequest.id}`).set(asUser(shirin.id))).body.ride;
+      const displayedTeslaId = card.vehicle.teslaId as string;
+      expect(displayedTeslaId).toBe(jashimProfile.driverCode);
+
+      // ...typed exactly as displayed into the street-ride lookup finds Bullet
+      const found = await request(app).get(`/qr/vehicles/${encodeURIComponent(displayedTeslaId)}`).set(asUser(tania.id));
+      expect(found.status).toBe(200);
+      expect(found.body).toMatchObject({ vehicleCode: displayedTeslaId, vehicle: { nickname: 'Bullet' } });
+      // and joining with it works
+      expect((await join(nusrat, { vehicleCode: displayedTeslaId, ...UTTARA_TO_DHANMONDI })).status).toBe(201);
+    });
+
+    it('the same Tesla ID is accepted however it is typed: case, spaces, and with or without the hyphen', async () => {
+      const id = bullet.vehicleCode as string; // "DTP-0007"
+      const spellings = [id, id.toLowerCase(), id.replace('-', ''), id.replace('-', '').toLowerCase(), `  ${id.toLowerCase()}  `, id.replace('-', ' ')];
+      for (const typed of spellings) {
+        const res = await request(app).get(`/qr/vehicles/${encodeURIComponent(typed)}`).set(asUser(tania.id));
+        expect([typed, res.status]).toEqual([typed, 200]);
+        expect(res.body.vehicleCode).toBe(id); // always answered with the canonical code
+      }
+      // and it is not fooled by a longer code that merely starts with it
+      expect((await request(app).get(`/qr/vehicles/${id}9`).set(asUser(tania.id))).status).toBe(404);
+    });
+
+    it('a vehicle onboarded through the real onboarding endpoint gets its Tesla ID as its code', async () => {
+      const signup = await request(app).post('/auth/signup').send({ name: 'Kamal', phone: '01717666666', password: 'secret123', role: 'DRIVER' });
+      expect(signup.status).toBe(201);
+      const done = await request(app)
+        .post('/driver/onboarding')
+        .set('Authorization', `Bearer ${signup.body.token}`)
+        .send({ nickname: 'Rocket', seatCapacity: 3, homeZone: 'Banani', nid: String(++nidCounter) });
+      expect(done.status).toBe(201);
+      const teslaId = done.body.profile.driverCode as string;
+
+      const vehicle = await Vehicle.findOne({ where: { driverId: signup.body.user.id } });
+      expect(vehicle!.vehicleCode).toBe(teslaId);
+      expect(vehicle!.licensePlate).toBe(teslaId);
+      const found = await request(app).get(`/qr/vehicles/${teslaId}`).set(asUser(tania.id));
+      expect(found.body).toMatchObject({ vehicleCode: teslaId, vehicle: { nickname: 'Rocket' } });
+    });
+
+    it('a vehicle with no driver profile still gets a usable random code', async () => {
+      const kamal = await User.create({ name: 'Kamal', phone: '01717555555', email: 'kamal4-qr@test.com', password: 'x', role: 'DRIVER' });
+      const v = await Vehicle.create({ driverId: kamal.id, modelName: 'Plain', seatCapacity: 3, licensePlate: 'PLAIN-1' });
+      expect(v.vehicleCode).toMatch(/^[A-Z0-9]{6}$/);
+      expect((await request(app).get(`/qr/vehicles/${v.vehicleCode}`).set(asUser(tania.id))).body.vehicle.nickname).toBe('Plain');
+    });
+
+    it('seat claims and releases never change a vehicle’s code', async () => {
+      const before = bullet.vehicleCode;
+      const a = await join(nusrat, UTTARA_TO_DHANMONDI);
+      await join(rafiq, UTTARA_TO_MIRPUR);
+      await arrived(rafiq, a.body.session.id);
+      await arrived(nusrat, a.body.session.id);
+      expect((await Vehicle.findByPk(bullet.id))!.vehicleCode).toBe(before);
+    });
+
+    it('a hand-set code is kept at creation, and the migration moves an old code to the Tesla ID exactly once', async () => {
+      const kamal = await User.create({ name: 'Kamal', phone: '01717444444', email: 'kamal5-qr@test.com', password: 'x', role: 'DRIVER' });
+      const profile = await DriverProfile.create({ userId: kamal.id, homeZone: 'Banani', nid: String(++nidCounter) });
+      const v = await Vehicle.create({ driverId: kamal.id, modelName: 'Old', seatCapacity: 3, licensePlate: 'OLDPLATE', vehicleCode: 'ZZZZ99' });
+      expect(v.vehicleCode).toBe('ZZZZ99'); // explicitly chosen: kept at creation
+      await migrateVehicleCodes(); // the invariant: an onboarded active vehicle's code is its Tesla ID
+      expect((await Vehicle.findByPk(v.id))!.vehicleCode).toBe(profile.driverCode);
+      await migrateVehicleCodes();
+      expect((await Vehicle.findByPk(v.id))!.vehicleCode).toBe(profile.driverCode);
+      expect((await Vehicle.findByPk(bullet.id))!.vehicleCode).toBe(jashimProfile.driverCode); // untouched
     });
   });
 
@@ -401,7 +502,7 @@ describe('QR street rides', () => {
       const a = await join(nusrat, UTTARA_TO_DHANMONDI);
       const sessionId = a.body.session.id;
       // Rafiq scanned while it was open (the preview returned its id)...
-      const preview = await request(app).get('/qr/vehicles/BULLET').set(asUser(rafiq.id));
+      const preview = await request(app).get(`/qr/vehicles/${bullet.vehicleCode}`).set(asUser(rafiq.id));
       expect(preview.body.session.id).toBe(sessionId);
       // ...but it closes before he confirms
       await arrived(nusrat, sessionId);
@@ -575,10 +676,10 @@ describe('QR street rides', () => {
       expect((await request(app).get(`/qr/sessions/${a.body.session.id}`)).status).toBe(401);
       expect((await view(tania, '00000000-0000-4000-8000-000000000000')).status).toBe(404);
 
-      const preview = await request(app).get('/qr/vehicles/bullet').set(asUser(tania.id)); // lower case works
+      const preview = await request(app).get(`/qr/vehicles/${bullet.vehicleCode.toLowerCase()}`).set(asUser(tania.id)); // lower case works
       expect(preview.status).toBe(200);
       expect(preview.body).toEqual({
-        vehicleCode: 'BULLET',
+        vehicleCode: bullet.vehicleCode,
         vehicle: { nickname: 'Bullet', seatCapacity: 3, seatsFree: 2 },
         session: { id: a.body.session.id, passengerCount: 1 },
       });
@@ -611,9 +712,9 @@ describe('QR street rides', () => {
     });
 
     it('needs a passenger login: no login is 401, and a driver’s login is refused', async () => {
-      expect((await request(app).post('/qr/join').send({ vehicleCode: 'BULLET', ...UTTARA_TO_DHANMONDI })).status).toBe(401);
-      expect((await request(app).post('/qr/join').set(asUser(jashim.id, 'DRIVER')).send({ vehicleCode: 'BULLET', ...UTTARA_TO_DHANMONDI })).status).toBe(403);
-      expect((await request(app).get('/qr/vehicles/BULLET')).status).toBe(401);
+      expect((await request(app).post('/qr/join').send({ vehicleCode: bullet.vehicleCode, ...UTTARA_TO_DHANMONDI })).status).toBe(401);
+      expect((await request(app).post('/qr/join').set(asUser(jashim.id, 'DRIVER')).send({ vehicleCode: bullet.vehicleCode, ...UTTARA_TO_DHANMONDI })).status).toBe(403);
+      expect((await request(app).get(`/qr/vehicles/${bullet.vehicleCode}`)).status).toBe(401);
     });
 
     it('a vehicle that is not active cannot be joined', async () => {

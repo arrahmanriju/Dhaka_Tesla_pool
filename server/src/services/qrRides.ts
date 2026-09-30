@@ -1,9 +1,10 @@
 import { Op, Transaction } from 'sequelize';
+import { fn, col, where as sqlWhere } from 'sequelize';
 import { sequelize, Vehicle, RideRequest, QRRideSession, QRRideParticipant, DriverBonus } from '../models';
 import { ACTIVE_RIDE_STATUSES, DHAKA_ZONES, MAX_SEATS_PER_RIDE } from '../models/RideRequest';
 import { calculateBaseFare, segmentDistanceKm, segmentFare } from '../utils/fareCalculator';
 import { claimSeats, releaseSeats } from '../utils/seats';
-import { normalizeVehicleCode } from '../utils/vehicleCode';
+import { compactVehicleCode, normalizeVehicleCode } from '../utils/vehicleCode';
 
 // ---------------------------------------------------------------------------
 // STREET RIDES BY QR CODE
@@ -51,6 +52,23 @@ export class QRError extends Error {
 }
 
 const IMMEDIATE = { type: Transaction.TYPES.IMMEDIATE };
+
+/**
+ * The ONE place a code is turned into a vehicle: the `Vehicles.vehicleCode` column, compared without
+ * hyphens, so "DTP-0001", "dtp-0001" and "DTP0001" all find the same active vehicle. (For an onboarded
+ * driver that code is their Tesla ID, the same value the app shows as "Tesla ID".)
+ */
+async function findVehicleByCode(canonicalCode: string, transaction?: Transaction) {
+  return Vehicle.findOne({
+    where: {
+      [Op.and]: [
+        sqlWhere(fn('REPLACE', col('vehicleCode'), '-', ''), compactVehicleCode(canonicalCode)),
+        { isActive: true },
+      ],
+    },
+    ...(transaction ? { transaction } : {}),
+  });
+}
 
 // ─────────────────────────── fares from the joins and exits ───────────────────────────
 
@@ -210,7 +228,7 @@ export async function joinSession(input: JoinInput): Promise<{ sessionId: string
   await closeStaleSessions(now);
 
   return sequelize.transaction(IMMEDIATE, async (t) => {
-    const vehicle = await Vehicle.findOne({ where: { vehicleCode: v.code, isActive: true }, transaction: t });
+    const vehicle = await findVehicleByCode(v.code, t);
     if (!vehicle) {
       throw new QRError(404, 'VEHICLE_NOT_FOUND', "We couldn't find a vehicle with that code. Check the code on the sticker and try again.");
     }
@@ -374,7 +392,7 @@ export async function getLatestSessionView(passengerId: string) {
 /** What a passenger sees after scanning, before joining. Reveals nothing about the driver. */
 export async function previewVehicle(rawCode: unknown, now: Date = new Date()) {
   const code = normalizeVehicleCode(rawCode);
-  const vehicle = code ? await Vehicle.findOne({ where: { vehicleCode: code, isActive: true } }) : null;
+  const vehicle = code ? await findVehicleByCode(code) : null;
   if (!vehicle) throw new QRError(404, 'VEHICLE_NOT_FOUND', "We couldn't find a vehicle with that code. Check the code on the sticker and try again.");
   await closeStaleSessions(now);
   const open = await QRRideSession.findOne({ where: { vehicleId: vehicle.id, status: 'OPEN' } });
