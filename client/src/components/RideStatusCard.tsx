@@ -1,7 +1,7 @@
 'use client';
 import { useCallback, useEffect, useState } from 'react';
 import { passengerApi, assetUrl, ApiError, type Ride } from '@/lib/api';
-import { usePreferences } from '@/lib/preferences';
+import { usePreferences, useFormatApiError } from '@/lib/preferences';
 import type { TranslationKey } from '@/lib/translations';
 import { StatusBadge, StatusTimeline } from './StatusBadge';
 import { PassengerFare, SeatCount } from './UI';
@@ -57,6 +57,9 @@ export function RideStatusCard({
   cancelling: boolean;
 }) {
   const { t, tp, tz, locale } = usePreferences();
+  const formatError = useFormatApiError();
+  // The ride can no longer be read (removed, or not this passenger's): say so instead of "reconnecting" forever
+  const [gone, setGone] = useState(false);
   const [ride, setRide] = useState<Ride>(initial);
   const [updatedAt, setUpdatedAt] = useState(() => new Date());
   const [connectionLost, setConnectionLost] = useState(false);
@@ -71,8 +74,10 @@ export function RideStatusCard({
       setConnectionLost(false);
       return true;
     } catch (err) {
+      const unreadable = err instanceof ApiError && (err.status === 403 || err.status === 404);
+      if (unreadable) setGone(true);
       setConnectionLost(true);
-      return !(err instanceof ApiError && (err.status === 403 || err.status === 404));
+      return !unreadable;
     }
   }, [initial.id]);
 
@@ -125,7 +130,7 @@ export function RideStatusCard({
       setLeaving(false);
       await fetchLatest(); // shows the outcome: where they left and what they were charged
     } catch (err) {
-      setLeaveError(err instanceof ApiError ? err.message : t('rs.reconnecting'));
+      setLeaveError(formatError(err)); // plain words, never a status code
     } finally {
       setLeaveBusy(false);
     }
@@ -257,7 +262,9 @@ export function RideStatusCard({
         <span className="ride-status__updated" id="ride-updated" style={{ fontSize: 12, color: 'var(--text-muted)' }}>
           {finished
             ? t('rs.final')
-            : connectionLost
+            : gone
+              ? t('rs.gone')
+              : connectionLost
               ? t('rs.reconnecting')
               : `${t('rs.updated', { time: updated })} · ${t('rs.autoRefresh')}`}
         </span>

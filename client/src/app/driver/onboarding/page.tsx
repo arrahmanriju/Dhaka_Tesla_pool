@@ -3,11 +3,11 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { AppNav } from '@/components/AppNav';
-import { LoadingScreen, ErrorBanner, Spinner } from '@/components/UI';
+import { LoadingScreen, ErrorBanner, ErrorState, Spinner } from '@/components/UI';
 import { driverApi, assetUrl, ApiError, type OnboardingProfile, type OnboardingState } from '@/lib/api';
 import { getUser } from '@/lib/auth';
 import { toAsciiDigits } from '@/lib/phone';
-import { usePreferences } from '@/lib/preferences';
+import { usePreferences, useFormatApiError } from '@/lib/preferences';
 import type { TranslationKey } from '@/lib/translations';
 
 const SEAT_OPTIONS = [1, 2, 3];
@@ -28,6 +28,8 @@ const readAsDataUrl = (file: File) =>
 export default function DriverOnboardingPage() {
   const router = useRouter();
   const { t, tp, tz } = usePreferences();
+  const formatError = useFormatApiError();
+  const [loadTry, setLoadTry] = useState(0); // bumped by the retry button
 
   const [state, setState] = useState<OnboardingState | null>(null);
   const [loadError, setLoadError] = useState('');
@@ -56,8 +58,8 @@ export default function DriverOnboardingPage() {
           if (SEAT_OPTIONS.includes(s.existingVehicle.seatCapacity)) setSeatCapacity(String(s.existingVehicle.seatCapacity));
         }
       })
-      .catch((err) => setLoadError(err.message));
-  }, [router]);
+      .catch((err) => setLoadError(formatError(err)));
+  }, [router, loadTry, formatError]);
 
   // Free the preview's object URL when it is replaced or the page closes.
   useEffect(() => () => { if (picture) URL.revokeObjectURL(picture.previewUrl); }, [picture]);
@@ -122,7 +124,7 @@ export default function DriverOnboardingPage() {
       } else if (err instanceof ApiError && err.code === 'VALIDATION' && err.fields) {
         setFormError(err.message);
       } else {
-        setFormError(err instanceof Error ? err.message : 'ob.err.fix');
+        setFormError(formatError(err)); // plain words, never a status code
       }
     } finally {
       setSaving(false);
@@ -133,7 +135,9 @@ export default function DriverOnboardingPage() {
     return (
       <div className="dashboard">
         <AppNav />
-        <div className="dashboard__body"><ErrorBanner message={loadError} /></div>
+        <div className="dashboard__body">
+          <ErrorState message={loadError} onRetry={() => { setLoadError(''); setLoadTry((n) => n + 1); }} />
+        </div>
       </div>
     );
   }

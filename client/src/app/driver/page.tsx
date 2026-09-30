@@ -7,7 +7,7 @@ import { StatusBadge } from '@/components/StatusBadge';
 import { MidTripOffers, MID_TRIP_POLL_MS } from '@/components/MidTripOffers';
 import { PoolTimeline } from '@/components/PoolTimeline';
 import { PaymentStatusTag } from '@/components/PaymentStatusTag';
-import { LoadingScreen, EmptyState, ErrorBanner, SuccessBanner, Spinner, SeatCount } from '@/components/UI';
+import { LoadingScreen, EmptyState, ErrorBanner, ErrorState, SuccessBanner, Spinner, SeatCount } from '@/components/UI';
 import { driverApi, ApiError, type Ride, type Vehicle } from '@/lib/api';
 import { getUser } from '@/lib/auth';
 import { usePreferences, useFormatApiError } from '@/lib/preferences';
@@ -20,6 +20,8 @@ const EARNINGS_REFRESH_MS = 10_000;
 export default function DriverDashboard() {
   const router = useRouter();
   const { t } = usePreferences();
+  const formatError = useFormatApiError();
+  const [toggleError, setToggleError] = useState('');
   const [user, setUser] = useState<ReturnType<typeof getUser>>(null);
   const [tab, setTab] = useState<Tab>('active');
   const [isOnline, setIsOnline] = useState(false);
@@ -38,13 +40,13 @@ export default function DriverDashboard() {
   const handleToggleOnline = async () => {
     if (!user) return;
     if (!isOnline && onboarded === false) return; // must finish onboarding first
-    setTogglingOnline(true);
+    setTogglingOnline(true); setToggleError('');
     try {
       const res = await driverApi.setOnlineStatus(user.id, !isOnline);
       setIsOnline(res.user.isOnline ?? !isOnline);
     } catch (err) {
       if (err instanceof ApiError && err.code === 'ONBOARDING_REQUIRED') setOnboarded(false);
-      // otherwise: silently revert
+      else setToggleError(formatError(err)); // the switch stays as it was, and the driver is told why
     } finally {
       setTogglingOnline(false);
     }
@@ -114,6 +116,8 @@ export default function DriverDashboard() {
           </label>
         </div>
 
+        {toggleError && <ErrorBanner message={toggleError} />}
+
         {tab === 'pending' && <PendingRequestsTab driverId={user.id} isOnline={isOnline} />}
         {tab === 'active'  && <ActiveRidesTab     driverId={user.id} />}
         {tab === 'vehicle' && <VehicleTab         driverId={user.id} />}
@@ -132,6 +136,8 @@ function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline
   const [noVehicle, setNoVehicle] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // The list itself could not be loaded (a failed accept uses `error` instead and keeps the list)
+  const [loadError, setLoadError] = useState('');
   const [accepting, setAccepting] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState('');
   // true while one of this driver's rides is STARTED (reported by the server with the list)
@@ -140,14 +146,15 @@ function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline
   // `silent` refreshes in the background: no spinner, and a failed refresh keeps the list on screen.
   // The server only returns requests that fit the vehicle, so nothing is filtered here.
   const load = useCallback(async (silent = false) => {
-    if (!silent) { setLoading(true); setError(''); }
+    if (!silent) { setLoading(true); setError(''); setLoadError(''); }
     try {
       const res = await driverApi.getPendingRides(driverId);
       setRides(res.rides);
       setNoVehicle(res.noVehicle);
       setMidTrip(res.midTrip);
-    } catch (err: any) {
-      if (!silent) setError(formatError(err));
+      setLoadError(''); // a background refresh that works clears an earlier failure
+    } catch (err) {
+      if (!silent) setLoadError(formatError(err));
     } finally {
       if (!silent) setLoading(false);
     }
@@ -168,7 +175,7 @@ function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline
       await driverApi.acceptRide(rideId, driverId);
       setSuccessMsg(t('d.pending.accepted'));
       await load();
-    } catch (err: any) {
+    } catch (err) {
       setError(formatError(err));
     } finally {
       setAccepting(null);
@@ -200,7 +207,9 @@ function PendingRequestsTab({ driverId, isOnline }: { driverId: string; isOnline
         </p>
       )}
 
-      {noVehicle ? (
+      {loadError ? (
+        <ErrorState message={loadError} onRetry={() => load()} />
+      ) : noVehicle ? (
         <EmptyState
           icon="🔧"
           title={t('d.pending.noVehicleTitle')}
@@ -267,18 +276,21 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
   const [totalEarnings, setTotalEarnings] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // The pool itself could not be loaded (a failed action uses `error` instead and keeps the list)
+  const [loadError, setLoadError] = useState('');
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState('');
 
   // `silent` refreshes in the background: no spinner, and a failed refresh is ignored.
   const load = useCallback(async (silent = false) => {
-    if (!silent) { setLoading(true); setError(''); }
+    if (!silent) { setLoading(true); setError(''); setLoadError(''); }
     try {
       const res = await driverApi.getActiveRides(driverId);
       setRides(res.rides);
       setTotalEarnings(res.totalEarnings);
-    } catch (err: any) {
-      if (!silent) setError(formatError(err));
+      setLoadError('');
+    } catch (err) {
+      if (!silent) setLoadError(formatError(err));
     } finally {
       if (!silent) setLoading(false);
     }
@@ -301,7 +313,7 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
       await driverApi[action](rideId, driverId);
       setSuccessMsg(t(`d.active.done.${action}`));
       await load();
-    } catch (err: any) {
+    } catch (err) {
       setError(formatError(err));
     } finally {
       setActionLoading(null);
@@ -310,9 +322,9 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
 
   if (loading) return <LoadingScreen label={t('loading.activeRides')} />;
 
-  // Only show EmptyState if load succeeded (no error). If there's an error,
-  // the ErrorBanner above already tells the user what went wrong.
-  const showEmpty = !error && rides.length === 0;
+  // The empty state means "we checked and there are none". If the load failed we do not know that,
+  // so the failure state is shown instead (with a retry).
+  const showEmpty = !loadError && rides.length === 0;
   // While any passenger is travelling, the driver is offered compatible requests to add mid-trip.
   const tripStarted = rides.some((r) => r.status === 'STARTED');
   // Re-read the pool history whenever a ride's status changes
@@ -331,7 +343,9 @@ function ActiveRidesTab({ driverId }: { driverId: string }) {
       {error && <ErrorBanner message={error} />}
       {successMsg && <SuccessBanner message={successMsg} />}
 
-      {showEmpty ? (
+      {loadError && rides.length === 0 ? (
+        <ErrorState message={loadError} onRetry={() => load()} />
+      ) : showEmpty ? (
         <EmptyState
           icon="🛺"
           title={t('d.active.emptyTitle')}
@@ -438,17 +452,21 @@ function ActiveDriverRideCard({
 // ─── Vehicle Tab ───────────────────────────────────────────────────────────
 function VehicleTab({ driverId }: { driverId: string }) {
   const { t } = usePreferences();
+  const formatError = useFormatApiError();
   const router = useRouter();
   const [vehicle, setVehicle] = useState<Vehicle | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    setLoading(true); setError('');
     driverApi.getVehicle(driverId)
       .then((res) => setVehicle(res.vehicle))
-      .catch((err) => setError(err.message))
+      .catch((err) => setError(formatError(err)))
       .finally(() => setLoading(false));
-  }, [driverId]);
+  }, [driverId, formatError]);
+
+  useEffect(() => { load(); }, [load]);
 
   if (loading) return <LoadingScreen label={t('loading.vehicle')} />;
 
@@ -461,9 +479,9 @@ function VehicleTab({ driverId }: { driverId: string }) {
         </div>
       </div>
 
-      {error && <ErrorBanner message={error} />}
-
-      {vehicle ? (
+      {error ? (
+        <ErrorState message={error} onRetry={load} />
+      ) : vehicle ? (
         <div className="card card--raised">
           <div className="card__header">
             <div>
@@ -512,16 +530,20 @@ function VehicleTab({ driverId }: { driverId: string }) {
 // ─── History Tab ───────────────────────────────────────────────────────────
 function HistoryTab({ driverId }: { driverId: string }) {
   const { t, tz, locale } = usePreferences();
+  const formatError = useFormatApiError();
   const [rides, setRides] = useState<Ride[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    setLoading(true); setError('');
     driverApi.getHistory(driverId)
       .then((res) => setRides(res.rides))
-      .catch((err) => setError(err.message))
+      .catch((err) => setError(formatError(err)))
       .finally(() => setLoading(false));
-  }, [driverId]);
+  }, [driverId, formatError]);
+
+  useEffect(() => { load(); }, [load]);
 
   if (loading) return <LoadingScreen label={t('loading.trips')} />;
 
@@ -540,7 +562,7 @@ function HistoryTab({ driverId }: { driverId: string }) {
         </div>
       </div>
 
-      {error && <ErrorBanner message={error} />}
+      {error && <ErrorState message={error} onRetry={load} />}
 
       {rides.length > 0 && (
         <div className="stats-row" style={{ marginBottom: 24 }}>
@@ -559,7 +581,7 @@ function HistoryTab({ driverId }: { driverId: string }) {
         </div>
       )}
 
-      {rides.length === 0 ? (
+      {error ? null : rides.length === 0 ? (
         <EmptyState
           icon="🕓"
           title={t('d.history.emptyTitle')}

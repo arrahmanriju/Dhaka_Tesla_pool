@@ -4,10 +4,10 @@ import { useRouter } from 'next/navigation';
 import { AppNav } from '@/components/AppNav';
 import { StatusBadge } from '@/components/StatusBadge';
 import { RideStatusCard } from '@/components/RideStatusCard';
-import { LoadingScreen, EmptyState, ErrorBanner, SuccessBanner, SeatCount, PassengerFare } from '@/components/UI';
+import { LoadingScreen, EmptyState, ErrorBanner, ErrorState, SuccessBanner, SeatCount, PassengerFare } from '@/components/UI';
 import { passengerApi, type FareEstimate, type PaymentMethod, type Ride, type User, ApiError } from '@/lib/api';
 import { getUser } from '@/lib/auth';
-import { usePreferences } from '@/lib/preferences';
+import { usePreferences, useFormatApiError } from '@/lib/preferences';
 
 type Tab = 'request' | 'active' | 'history';
 
@@ -85,7 +85,11 @@ function RequestRideTab({
   onViewActive: () => void;
 }) {
   const { t, tp, tz } = usePreferences();
+  const formatError = useFormatApiError();
   const [zones, setZones] = useState<string[]>([]);
+  // The zone dropdown is built from the server: loading -> ready, or failed (with a retry, never a dead empty list)
+  const [zonesStatus, setZonesStatus] = useState<'loading' | 'ready' | 'failed'>('loading');
+  const [zonesTry, setZonesTry] = useState(0);
   const [maxSeats, setMaxSeats] = useState(3);
   const [pickup, setPickup] = useState('');
   const [destination, setDestination] = useState('');
@@ -104,14 +108,13 @@ function RequestRideTab({
   // Zone list (from the server) and whether the passenger already has a ride in progress.
   useEffect(() => {
     passengerApi.getRideOptions()
-      .then((o) => { setZones(o.zones); setMaxSeats(o.maxSeats); })
-      .catch(() => setError(t('p.req.zonesError')));
+      .then((o) => { setZones(o.zones); setMaxSeats(o.maxSeats); setZonesStatus('ready'); })
+      .catch(() => setZonesStatus('failed'));
     passengerApi.getActiveRides()
       .then((r) => setHasActiveRide(r.rides.length > 0))
       .catch(() => { /* the server enforces the rule either way */ });
     passengerApi.getWallet().then((w) => setWalletBalance(w.balance)).catch(() => { /* shown only when known */ });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user.id]);
+  }, [user.id, zonesTry]);
 
   // Live fare estimate, refreshed (debounced) whenever the form changes.
   const canEstimate = !!pickup && !!destination && pickup !== destination;
@@ -150,10 +153,8 @@ function RequestRideTab({
       if (err instanceof ApiError && err.code === 'ACTIVE_RIDE_EXISTS') {
         setHasActiveRide(true);
         setError('');
-      } else if (err instanceof ApiError) {
-        setError(t('common.errorWithStatus', { status: err.status, message: err.message }));
       } else {
-        setError(err instanceof Error && err.message ? err.message : t('p.req.unexpected'));
+        setError(formatError(err)); // plain words, never a status code
       }
       setLoading(false);
     }
@@ -181,6 +182,13 @@ function RequestRideTab({
             </div>
           )}
           {error && <ErrorBanner message={error} />}
+          {zonesStatus === 'loading' && <p className="form-hint" id="zones-loading">{t('loading.zones')}</p>}
+          {zonesStatus === 'failed' && (
+            <ErrorState
+              message={t('p.req.zonesError')}
+              onRetry={() => { setZonesStatus('loading'); setZonesTry((n) => n + 1); }}
+            />
+          )}
           <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 20, marginTop: error ? 16 : 0 }}>
             <p style={{ fontSize: 13, color: 'var(--text-muted)', margin: 0 }}>
               {t('p.req.bookingAs', { name: user.name, phone: user.phone ?? '' })}
@@ -309,7 +317,7 @@ function RequestRideTab({
               id="request-ride-submit"
               type="submit"
               className="btn btn--primary btn--full"
-              disabled={loading || hasActiveRide || !pickup || !destination || !estimate}
+              disabled={loading || hasActiveRide || zonesStatus !== 'ready' || !pickup || !destination || !estimate}
             >
               {loading ? t('p.req.submitting') : t('p.req.submit')}
             </button>
@@ -330,7 +338,10 @@ function ActiveRidesTab({
   justRequested: boolean;
 }) {
   const { t } = usePreferences();
+  const formatError = useFormatApiError();
   const [rides, setRides] = useState<Ride[]>([]);
+  // The list itself could not be loaded (as opposed to a failed action on a ride, which uses `error`)
+  const [loadError, setLoadError] = useState('');
   // Bumped on every reload so each ride card starts again from the fresh data.
   const [version, setVersion] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -339,17 +350,17 @@ function ActiveRidesTab({
   const [cancelSuccess, setCancelSuccess] = useState('');
 
   const load = useCallback(async () => {
-    setLoading(true); setError('');
+    setLoading(true); setError(''); setLoadError('');
     try {
       const res = await passengerApi.getActiveRides();
       setRides(res.rides);
       setVersion((v) => v + 1);
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err) {
+      setLoadError(formatError(err));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [formatError]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -360,8 +371,8 @@ function ActiveRidesTab({
     try {
       await passengerApi.cancelRide(rideId);
       setCancelSuccess(t('p.active.cancelled'));
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err) {
+      setError(formatError(err));
     } finally {
       setCancelling(null);
     }
@@ -383,7 +394,9 @@ function ActiveRidesTab({
       {justRequested && <SuccessBanner message={t('p.req.success')} />}
       {cancelSuccess && <SuccessBanner message={cancelSuccess} />}
 
-      {rides.length === 0 ? (
+      {loadError ? (
+        <ErrorState message={loadError} onRetry={() => load()} />
+      ) : rides.length === 0 ? (
         <EmptyState
           icon="🛣️"
           title={t('p.active.emptyTitle')}
@@ -413,16 +426,20 @@ function ActiveRidesTab({
 // ─── History Tab ───────────────────────────────────────────────────────────
 function HistoryTab() {
   const { t, tz, locale } = usePreferences();
+  const formatError = useFormatApiError();
   const [rides, setRides] = useState<Ride[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    setLoading(true); setError('');
     passengerApi.getHistory()
       .then((res) => setRides(res.rides))
-      .catch((err) => setError(err.message))
+      .catch((err) => setError(formatError(err)))
       .finally(() => setLoading(false));
-  }, []);
+  }, [formatError]);
+
+  useEffect(() => { load(); }, [load]);
 
   if (loading) return <LoadingScreen label={t('loading.history')} />;
 
@@ -438,7 +455,7 @@ function HistoryTab() {
         </div>
       </div>
 
-      {error && <ErrorBanner message={error} />}
+      {error && <ErrorState message={error} onRetry={load} />}
 
       {rides.length > 0 && (
         <div className="stats-row" style={{ marginBottom: 24 }}>
@@ -457,7 +474,7 @@ function HistoryTab() {
         </div>
       )}
 
-      {rides.length === 0 ? (
+      {error ? null : rides.length === 0 ? (
         <EmptyState
           icon="🕓"
           title={t('p.history.emptyTitle')}
