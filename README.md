@@ -25,6 +25,36 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 
 **On a hosting platform:** add an environment variable named exactly **`JWT_SECRET`**, with a value from the command above, in the platform's environment or secrets settings for the server service. Changing it later signs everyone out (existing tokens stop verifying) and invalidates any password-reset codes that were pending.
 
+## Deploying (Railway for the API, Vercel for the website)
+
+The API is an Express server with a **SQLite file and uploaded driver photos on disk**, so it needs a host with a **persistent volume** and one long-running process: **Railway**. The Next.js website has no server-side state and runs on **Vercel**. Deploy the API first (the website needs its address), then the website, then tell the API which website may call it.
+
+**1. The API on Railway**
+1. In Railway, **New Project → Deploy from GitHub repo** and pick this repository. Open the service's **Settings** and set **Root Directory** to `server`. Railway reads `server/railway.json` (it builds `server/Dockerfile`, checks `GET /health`, restarts on failure, and keeps **one** replica, because SQLite is a single-writer file).
+2. **Add a Volume** to the service and mount it at `/app/data`. The database (`database.sqlite`) and the uploaded photos live there and survive redeploys. Without the volume the data is lost on every deploy.
+3. In **Variables** add the settings below. `PORT` is set by Railway itself.
+4. **Settings → Networking → Generate Domain** to get the API's public HTTPS address, for example `https://tesla-pool-api.up.railway.app`. Open `https://<that address>/health`: it answers `{"status":"ok",...}` when the API is up. The database tables are created and upgraded automatically when the server starts.
+5. Optional demo data: open the service's shell (`railway ssh`, or the dashboard) and run `npm run seed` once. It creates the demo accounts (password `password123`), so skip it for anything that is not a demo.
+
+| Railway variable | Value |
+|---|---|
+| `JWT_SECRET` | **required**: from `openssl rand -base64 32`. The server refuses to start without it. |
+| `NODE_ENV` | `production` |
+| `DB_STORAGE_PATH` | `/app/data/database.sqlite` (on the volume) |
+| `CORS_ORIGIN` | the website's address, e.g. `https://tesla-pool.vercel.app` (add it after step 2 below; several addresses can be separated by commas) |
+
+**2. The website on Vercel**
+1. In Vercel, **Add New → Project**, import the same repository, and set **Root Directory** to `client`. The framework is detected as Next.js; keep the defaults.
+2. Add the environment variable **`NEXT_PUBLIC_API_URL`** = the Railway address from step 1.4, with no trailing slash, for **Production** (and Preview if you use it). It is baked into the site when it is built, so **redeploy after changing it**.
+3. Deploy, and open the address Vercel gives you.
+4. Back in Railway, set **`CORS_ORIGIN`** to that Vercel address (and redeploy the API). From then on the API answers browsers only from your website; until it is set, the API allows every website.
+
+**Things to know**
+- **Password reset:** there is no SMS gateway yet (`server/src/utils/sms.ts`), so in production the reset code is **not** returned or delivered. Setting `RESET_CODE_IN_RESPONSE=true` returns it in the response for a demo, which is not safe for real users.
+- **One API instance:** do not scale the API to several replicas: each would have its own SQLite file. Growing beyond one instance means moving to a client/server database (see *What I would change at larger scale* under Concurrency Handling).
+- **Backups:** the volume holds all data. Copy `database.sqlite` off the volume (for example with `railway ssh`) before risky changes; there is no automatic backup.
+- **Docker instead:** `docker compose up --build` still runs everything locally. Its client image takes the API address from the build argument `NEXT_PUBLIC_API_URL` (default `http://localhost:3001`).
+
 ## Tesla Pooling
 This project supports ride-pooling. When drivers search for pending ride requests, they are filtered according to specific rules to ensure rides can be logically shared in a single vehicle.
 
