@@ -225,6 +225,15 @@ export function RideStatusCard({
         </span>
       </div>
 
+      {/* Payment: how this ride is paid and whether it has been (this passenger's own ride only) */}
+      {ride.paymentStatus && (
+        <div className="ride-block__line" id="ride-payment" data-payment-status={ride.paymentStatus} style={{ marginTop: 8 }}>
+          {ride.paymentMethod === 'wallet' ? '💳' : '💵'} {ride.paymentMethod === 'wallet' ? t('pay.wallet') : t('pay.cash')}
+          {' · '}
+          {t(`pay.status.${ride.paymentStatus}` as TranslationKey, { amount: ride.paymentAmount ?? ride.estimatedFare })}
+        </div>
+      )}
+
       {/* How the fare was (or would be) worked out: ৳100 plus each stretch at the rate for who was on board */}
       {ride.fareBreakdown && ride.fareBreakdown.segments.some((s) => s.distanceKm > 0) && (
         <section className="ride-block" id="ride-fare-breakdown" aria-label={t('rs.bill.title')}>

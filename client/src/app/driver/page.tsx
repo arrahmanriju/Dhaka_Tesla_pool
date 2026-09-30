@@ -6,6 +6,7 @@ import { AppNav } from '@/components/AppNav';
 import { StatusBadge } from '@/components/StatusBadge';
 import { MidTripOffers, MID_TRIP_POLL_MS } from '@/components/MidTripOffers';
 import { PoolTimeline } from '@/components/PoolTimeline';
+import { PaymentStatusTag } from '@/components/PaymentStatusTag';
 import { LoadingScreen, EmptyState, ErrorBanner, SuccessBanner, Spinner, SeatCount } from '@/components/UI';
 import { driverApi, ApiError, type Ride, type Vehicle } from '@/lib/api';
 import { getUser } from '@/lib/auth';
@@ -391,6 +392,7 @@ function ActiveDriverRideCard({
         <span className="ride-card__arrow">→</span>
         <span className="ride-card__zone">{tz(ride.destinationZone)}</span>
         <StatusBadge status={ride.status} />
+        <PaymentStatusTag ride={ride} />
       </div>
 
       <div className="ride-card__meta">
@@ -572,6 +574,7 @@ function HistoryTab({ driverId }: { driverId: string }) {
                 <span className="ride-card__arrow">→</span>
                 <span className="ride-card__zone">{tz(ride.destinationZone)}</span>
                 <StatusBadge status={ride.status} />
+                <PaymentStatusTag ride={ride} />
               </div>
               <div className="ride-card__meta">
                 <span className="ride-card__meta-item">

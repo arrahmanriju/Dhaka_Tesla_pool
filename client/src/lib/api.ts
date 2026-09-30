@@ -50,6 +50,18 @@ async function request<T>(
 
 export type Role = 'PASSENGER' | 'DRIVER';
 
+/** cash: pay the driver; wallet: the simulated TeslaPay wallet (no real gateway) */
+export type PaymentMethod = 'cash' | 'wallet';
+/** NOT_DUE until the journey ends, then CASH_DUE / PAID / FAILED (a failed wallet payment is settled in cash) */
+export type PaymentStatus = 'NOT_DUE' | 'CASH_DUE' | 'PAID' | 'FAILED';
+
+export interface Wallet {
+  /** Whole taka. Only ever the logged-in passenger's own balance. */
+  balance: number;
+  currency: string;
+  transactions: { rideId: string; type: 'DEBIT'; amount: number; balanceAfter: number; at: string }[];
+}
+
 export type RideStatus =
   | 'REQUESTED'
   | 'MATCHED'
@@ -102,6 +114,8 @@ export interface RideRequestInput {
   destinationZone: string;
   seatCount: number;
   allowSharing: boolean;
+  /** How the passenger pays; defaults to cash on the server */
+  paymentMethod?: PaymentMethod;
 }
 
 /** What one passenger pays when `passengers` people share the ride (whole taka). */
@@ -206,6 +220,11 @@ export interface Ride {
   canCancelInTransit?: boolean;
   /** Where the passenger left the ride (CANCELLED_IN_TRANSIT only) */
   cancellationZone?: string | null;
+  /** How this ride is paid and whether it has been. Drivers see this too, but never a wallet balance. */
+  paymentMethod?: PaymentMethod;
+  paymentStatus?: PaymentStatus;
+  /** The final fare that was owed or charged; null until the journey ends */
+  paymentAmount?: number | null;
   /** true when this passenger was matched while another passenger was already travelling */
   joinedMidTrip?: boolean;
   createdAt: string;
@@ -326,6 +345,9 @@ export const passengerApi = {
   getRide: (rideId: string) => request<{ ride: Ride }>(`/passenger/rides/${rideId}`),
 
   getHistory: () => request<{ rides: Ride[] }>('/passenger/rides/history'),
+
+  /** The logged-in passenger's own TeslaPay wallet. */
+  getWallet: () => request<Wallet>('/passenger/wallet'),
 
   /** Leave a ride that has already started, at the zone where the passenger is dropped off. */
   cancelInTransit: (rideId: string, cancellationZone: string) =>

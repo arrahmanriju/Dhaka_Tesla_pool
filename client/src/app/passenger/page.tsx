@@ -5,7 +5,7 @@ import { AppNav } from '@/components/AppNav';
 import { StatusBadge } from '@/components/StatusBadge';
 import { RideStatusCard } from '@/components/RideStatusCard';
 import { LoadingScreen, EmptyState, ErrorBanner, SuccessBanner, SeatCount, PassengerFare } from '@/components/UI';
-import { passengerApi, type FareEstimate, type Ride, type User, ApiError } from '@/lib/api';
+import { passengerApi, type FareEstimate, type PaymentMethod, type Ride, type User, ApiError } from '@/lib/api';
 import { getUser } from '@/lib/auth';
 import { usePreferences } from '@/lib/preferences';
 
@@ -91,6 +91,9 @@ function RequestRideTab({
   const [destination, setDestination] = useState('');
   const [seats, setSeats] = useState(1);
   const [allowSharing, setAllowSharing] = useState(true);
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
+  // The passenger's own wallet balance, shown next to the payment choice
+  const [walletBalance, setWalletBalance] = useState<number | null>(null);
   // Each estimate is stored with the form values it was computed for, so an answer for
   // an older form state is simply ignored (and "calculating" is derived, not stored).
   const [result, setResult] = useState<{ key: string; estimate: FareEstimate | null } | null>(null);
@@ -106,6 +109,7 @@ function RequestRideTab({
     passengerApi.getActiveRides()
       .then((r) => setHasActiveRide(r.rides.length > 0))
       .catch(() => { /* the server enforces the rule either way */ });
+    passengerApi.getWallet().then((w) => setWalletBalance(w.balance)).catch(() => { /* shown only when known */ });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user.id]);
 
@@ -140,7 +144,7 @@ function RequestRideTab({
     if (pickup === destination) { setError(t('p.req.sameZone')); return; }
     setError(''); setLoading(true);
     try {
-      await passengerApi.requestRide({ pickupZone: pickup, destinationZone: destination, seatCount: seats, allowSharing });
+      await passengerApi.requestRide({ pickupZone: pickup, destinationZone: destination, seatCount: seats, allowSharing, paymentMethod });
       onCreated(); // the ride now shows on the status tab
     } catch (err) {
       if (err instanceof ApiError && err.code === 'ACTIVE_RIDE_EXISTS') {
@@ -244,6 +248,24 @@ function RequestRideTab({
                 />
                 <span className="toggle-switch__slider" />
               </label>
+            </div>
+
+            {/* How the passenger pays: cash to the driver, or the simulated TeslaPay wallet */}
+            <div className="form-group">
+              <label className="form-label" htmlFor="payment-method">{t('pay.method')}</label>
+              <select
+                id="payment-method"
+                className="form-control"
+                value={paymentMethod}
+                onChange={(e) => setPaymentMethod(e.target.value as PaymentMethod)}
+              >
+                <option value="cash">{t('pay.cash')}</option>
+                <option value="wallet">{t('pay.wallet')}</option>
+              </select>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }} id="payment-hint">
+                {paymentMethod === 'wallet' ? t('pay.hint.wallet') : t('pay.hint.cash')}
+                {walletBalance !== null && <> · <strong>{t('pay.balance', { balance: walletBalance })}</strong></>}
+              </div>
             </div>
 
             {/* Fare preview */}
