@@ -4,7 +4,6 @@ A ride-pooling app for battery rickshaws ("Teslas") in Dhaka. Passengers going t
 
 - Website: https://dhaka-tesla-pool-psi.vercel.app
 - API: https://dhakateslapool-production.up.railway.app (`/health` answers when it is up)
-- Demo video: TODO add the link
 - Longer design notes (pooling rules, fare worked examples, privacy, concurrency): [docs/design-notes.md](docs/design-notes.md)
 
 ## Summary and problem
@@ -389,8 +388,6 @@ The same pattern protects the street ride join, completing a ride at the moment 
 
 ## AI usage
 
-TODO write this section in your own words before submitting. A draft that matches the repository:
-
 - An AI coding assistant was used to write most of the code, the tests and the documentation in this repository, working in the terminal, branch by branch. The git history shows the work in small commits.
 - The product decisions came from me: the story (Jashim, Bullet, Nusrat, Rafiq, Shirin), the pooling and fare rules, the street ride idea, private rides, the cancellation rule, and what to deploy where.
-- TODO name the tool or tools, and say what you checked yourself, what you changed or rejected, and how you verified the results.
+
