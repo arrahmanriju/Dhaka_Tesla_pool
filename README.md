@@ -41,15 +41,6 @@ Dhaka Tesla Pool puts the three in Bullet together. Each pays less than they wou
 - A started trip keeps taking compatible passengers.
 - Everyone in a car is only "Passenger 1", "Passenger 2". No names or user ids are shown to drivers or co-passengers.
 
-## Screenshots
-
-TODO add screenshots or GIFs. Suggested set:
-1. Landing and sign-up page
-2. Passenger: Request Ride with the fare preview
-3. Passenger: Active Ride with two other passengers
-4. Driver: Pending Requests and Active Ride with earnings
-5. Driver onboarding
-6. Passenger: Street Ride tab and the trip in History
 
 ## Architecture
 
